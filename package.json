@@ -1,0 +1,61 @@
+{
+  "name": "@rochecompaan/pi-context-paging",
+  "version": "0.1.0",
+  "description": "Bounded rolling context and exact history recovery for Pi",
+  "private": false,
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node --test --experimental-strip-types tests/*.test.ts",
+    "bench": "node --experimental-strip-types bench/context-policy.bench.ts",
+    "check:package": "node scripts/smoke-packed-artifact.mjs",
+    "check": "npm run typecheck && npm test && npm run check:package"
+  },
+  "files": [
+    "src",
+    "docs/architecture.md",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "pi-package",
+    "pi",
+    "context-window",
+    "history",
+    "llm"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/rochecompaan/pi-context-paging.git"
+  },
+  "bugs": {
+    "url": "https://github.com/rochecompaan/pi-context-paging/issues"
+  },
+  "homepage": "https://github.com/rochecompaan/pi-context-paging#readme",
+  "publishConfig": {
+    "access": "public"
+  },
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-agent-core": "*",
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-agent-core": "0.87.1",
+    "@earendil-works/pi-ai": "0.87.1",
+    "@earendil-works/pi-coding-agent": "0.87.1",
+    "@types/node": "24.19.0",
+    "typebox": "1.3.34",
+    "typescript": "5.9.3"
+  }
+}

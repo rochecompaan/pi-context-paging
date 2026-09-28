@@ -1,0 +1,68 @@
+name: Publish
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+          package-manager-cache: false
+
+      - name: Match tag and package versions
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          node <<'NODE'
+          const packageJson = require("./package.json");
+          const expected = `v${packageJson.version}`;
+          if (process.env.RELEASE_TAG !== expected) {
+            throw new Error(`tag ${process.env.RELEASE_TAG} does not match ${expected}`);
+          }
+          NODE
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Check package
+        run: npm run check
+
+      - name: Publish to npm when absent
+        run: |
+          set -euo pipefail
+          package_name=$(node -p 'require("./package.json").name')
+          package_version=$(node -p 'require("./package.json").version')
+          if npm view "$package_name@$package_version" version >/dev/null 2>&1; then
+            echo "$package_name@$package_version is already published"
+          else
+            npm publish --provenance --access public
+          fi
+
+      - name: Create GitHub release when absent
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "$GITHUB_REF_NAME release already exists"
+          else
+            gh release create "$GITHUB_REF_NAME" \
+              --verify-tag \
+              --generate-notes \
+              --title "$GITHUB_REF_NAME"
+          fi
