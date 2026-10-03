@@ -1,7 +1,7 @@
 import { estimateTokens } from "@earendil-works/pi-coding-agent";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage, ToolResultMessage, UserMessage } from "@earendil-works/pi-ai";
-import type { HistoryItem } from "./history.ts";
+import { isInterruptedAssistantMessage, type HistoryItem } from "./history.ts";
 
 export const DEFAULT_CONTEXT_TOKEN_BUDGET = 128_000;
 
@@ -17,6 +17,10 @@ export type ContextSelectionInput = {
 	activeTools: readonly ResidentToolDefinition[];
 	modelContextWindow: number | undefined;
 	tokenBudget: number;
+	/** A provider-backed full-context estimate, when its usage basis is known. */
+	contextTokens?: number;
+	/** Messages present only in this outgoing request, not the persistent session branch. */
+	outgoingOnly?: readonly boolean[];
 	rawHistoryItems?: readonly HistoryItem[];
 };
 
@@ -72,6 +76,7 @@ type ActiveTurnUnit = {
 	kind: "activeTurn";
 	request: RequestMessage[];
 	exchanges: ToolExchange[];
+	trailingOutgoing: AgentMessage[];
 };
 
 type GroupedContext = {
@@ -99,17 +104,21 @@ function temporaryUserMessage(content: string): UserMessage {
 	return { role: "user", content, timestamp: 0 };
 }
 
-function residentTokenEstimate(input: ContextSelectionInput): number {
+export function residentTokenEstimate(input: Pick<ContextSelectionInput, "systemPrompt" | "activeTools">): number {
 	const tools = input.activeTools.map(({ name, description, parameters }) => ({ name, description, parameters }));
-	return estimateTokens(temporaryUserMessage(input.systemPrompt))
-		+ estimateTokens(temporaryUserMessage(JSON.stringify(tools)));
+	// Pi 0.87 counts the rendered system content and toolsAdded schema together.
+	return Math.ceil((input.systemPrompt.length + JSON.stringify(tools).length) / 4);
 }
 
 function structureError(message: string): ContextSelectionError {
 	return new ContextSelectionError("INVALID_MESSAGE_STRUCTURE", message);
 }
 
-function exchangeAt(messages: readonly AgentMessage[], index: number): { exchange: ToolExchange; nextIndex: number } {
+function exchangeAt(
+	messages: readonly AgentMessage[],
+	index: number,
+	allowIncomplete = false,
+): { exchange: ToolExchange; nextIndex: number } {
 	const assistant = messages[index] as AssistantMessage;
 	const calls = assistant.content.filter(isToolCallBlock);
 	if (calls.length === 0) {
@@ -132,10 +141,42 @@ function exchangeAt(messages: readonly AgentMessage[], index: number): { exchang
 		results.push(result);
 		nextIndex++;
 	}
-	if (seenIds.size !== expectedIds.size) {
+	if (seenIds.size !== expectedIds.size && !allowIncomplete) {
 		throw structureError("Canonical tool-call exchange is incomplete.");
 	}
 	return { exchange: { assistant, results, messages: [assistant, ...results] }, nextIndex };
+}
+
+function normalizeInterruptedExchanges(
+	messages: readonly AgentMessage[],
+	outgoingOnly: readonly boolean[],
+): { messages: AgentMessage[]; outgoingOnly: readonly boolean[] } {
+	const normalized: AgentMessage[] = [];
+	const normalizedOutgoingOnly: boolean[] = [];
+	let removedInterruptedExchange = false;
+	for (let index = 0; index < messages.length;) {
+		const message = messages[index]!;
+		if (message.role === "toolResult") {
+			throw structureError("Canonical context contains an orphan tool result.");
+		}
+		if (message.role !== "assistant") {
+			normalized.push(message);
+			normalizedOutgoingOnly.push(outgoingOnly[index]!);
+			index++;
+			continue;
+		}
+		const interrupted = isInterruptedAssistantMessage(message);
+		const { exchange, nextIndex } = exchangeAt(messages, index, interrupted);
+		if (interrupted) removedInterruptedExchange = true;
+		else {
+			normalized.push(...exchange.messages);
+			normalizedOutgoingOnly.push(...outgoingOnly.slice(index, nextIndex));
+		}
+		index = nextIndex;
+	}
+	return removedInterruptedExchange
+		? { messages: normalized, outgoingOnly: normalizedOutgoingOnly }
+		: { messages: messages as AgentMessage[], outgoingOnly };
 }
 
 function unitsForSegment(messages: readonly AgentMessage[]): AgentMessage[][] {
@@ -155,11 +196,12 @@ function unitsForSegment(messages: readonly AgentMessage[]): AgentMessage[][] {
 	return units;
 }
 
-function requestStartIndexes(messages: readonly AgentMessage[]): number[] {
+function requestStartIndexes(messages: readonly AgentMessage[], outgoingOnly: readonly boolean[]): number[] {
 	const indexes: number[] = [];
 	let followsUserRequest = false;
 	for (let index = 0; index < messages.length; index++) {
 		const message = messages[index]!;
+		if (outgoingOnly[index]) continue;
 		if (message.role === "user") {
 			indexes.push(index);
 			followsUserRequest = true;
@@ -174,17 +216,17 @@ function requestStartIndexes(messages: readonly AgentMessage[]): number[] {
 	return indexes;
 }
 
-function requestEnvelope(messages: readonly AgentMessage[], start: number): RequestMessage[] {
+function requestEnvelope(messages: readonly AgentMessage[], start: number, outgoingOnly: readonly boolean[]): RequestMessage[] {
 	const request = [messages[start] as RequestMessage];
 	if (request[0].role !== "user") return request;
-	for (let index = start + 1; messages[index]?.role === "custom"; index++) {
-		request.push(messages[index] as Extract<AgentMessage, { role: "custom" }>);
+	for (let index = start + 1; messages[index] && (messages[index]!.role === "custom" || outgoingOnly[index]); index++) {
+		request.push(messages[index] as RequestMessage);
 	}
 	return request;
 }
 
-function groupContext(messages: readonly AgentMessage[]): GroupedContext {
-	const requestIndexes = requestStartIndexes(messages);
+function groupContext(messages: readonly AgentMessage[], outgoingOnly: readonly boolean[]): GroupedContext {
+	const requestIndexes = requestStartIndexes(messages, outgoingOnly);
 	if (requestIndexes.length === 0) return { prefixes: unitsForSegment(messages).map((messages) => ({ kind: "prefix", messages })) } as GroupedContext;
 
 	const prefixes = unitsForSegment(messages.slice(0, requestIndexes[0]))
@@ -199,17 +241,23 @@ function groupContext(messages: readonly AgentMessage[]): GroupedContext {
 
 	const activeStart = requestIndexes.at(-1)!;
 	const activeMessages = messages.slice(activeStart);
-	const request = requestEnvelope(activeMessages, 0);
+	const request = requestEnvelope(activeMessages, 0, outgoingOnly.slice(activeStart));
 	const exchanges: ToolExchange[] = [];
+	const trailingOutgoing: AgentMessage[] = [];
 	for (let index = request.length; index < activeMessages.length;) {
 		const message = activeMessages[index];
+		if (outgoingOnly[activeStart + index]) {
+			trailingOutgoing.push(message);
+			index++;
+			continue;
+		}
 		if (message.role === "toolResult") throw structureError("Canonical context contains an orphan tool result.");
 		if (message.role !== "assistant") throw structureError("Canonical active turn has an unsupported message structure.");
 		const { exchange, nextIndex } = exchangeAt(activeMessages, index);
 		exchanges.push(exchange);
 		index = nextIndex;
 	}
-	return { prefixes, completedTurns, activeTurn: { kind: "activeTurn", request, exchanges } };
+	return { prefixes, completedTurns, activeTurn: { kind: "activeTurn", request, exchanges, trailingOutgoing } };
 }
 
 type TokenCache = {
@@ -218,6 +266,8 @@ type TokenCache = {
 };
 
 function messageEstimate(message: AgentMessage, cache: TokenCache): number {
+	// Rendered system/tool metadata is already covered by residentTokenEstimate.
+	if (message.role === "system") return 0;
 	const cached = cache.messages.get(message);
 	if (cached !== undefined) return cached;
 	const estimate = estimateTokens(message);
@@ -429,6 +479,10 @@ function error(code: ContextSelectionErrorCode, message: string, residentTokens:
 	return new ContextSelectionError(code, message, residentTokens, estimatedTokens, budgetTokens);
 }
 
+function validContextTokens(value: unknown): value is number {
+	return typeof value === "number" && Number.isFinite(value) && value >= 0;
+}
+
 export function selectContext(input: ContextSelectionInput): ContextSelection {
 	if (
 		input.modelContextWindow !== undefined
@@ -444,22 +498,36 @@ export function selectContext(input: ContextSelectionInput): ContextSelection {
 		: Math.min(input.tokenBudget, input.modelContextWindow);
 	const modelLimit = input.modelContextWindow ?? Number.POSITIVE_INFINITY;
 	const residentTokens = residentTokenEstimate(input);
-	if (residentTokens > budgetTokens) {
+	const inputOutgoingOnly = input.outgoingOnly?.length === input.messages.length
+		? input.outgoingOnly
+		: input.messages.map(() => false);
+	const { messages, outgoingOnly } = normalizeInterruptedExchanges(input.messages, inputOutgoingOnly);
+	const grouped = groupContext(messages, outgoingOnly);
+	const tokenCache: TokenCache = { messages: new Map(), units: new WeakMap() };
+	const rawInputEstimate = residentTokens + unitEstimate(input.messages, tokenCache);
+	const rawFullEstimate = messages === input.messages
+		? rawInputEstimate
+		: residentTokens + unitEstimate(messages, tokenCache);
+	const contextTokens = validContextTokens(input.contextTokens) ? input.contextTokens : undefined;
+	// Usage describes the incoming snapshot; normalization removes tokens, not its calibration.
+	const calibration = contextTokens === undefined ? 0 : contextTokens - rawInputEstimate;
+	// Keep one adjustment for this selection so each FIFO removal changes only its own estimate.
+	const calibrated = (rawEstimate: number): number => rawEstimate + calibration;
+	const reported = (rawEstimate: number): number => Math.max(0, calibrated(rawEstimate));
+	if (contextTokens === undefined && residentTokens > budgetTokens) {
 		throw error("RESIDENT_INPUT_TOO_LARGE", `Resident input estimate ${residentTokens} exceeds budget estimate ${budgetTokens}.`, residentTokens, residentTokens, budgetTokens);
 	}
 
-	const grouped = groupContext(input.messages);
-	const tokenCache: TokenCache = { messages: new Map(), units: new WeakMap() };
-	const fullEstimate = residentTokens + unitEstimate(input.messages, tokenCache);
+	const fullEstimate = calibrated(rawFullEstimate);
 	if (fullEstimate <= budgetTokens) {
-		return { messages: input.messages as AgentMessage[], estimatedTokens: fullEstimate, budgetTokens, mode: "within-budget" };
+		return { messages, estimatedTokens: reported(rawFullEstimate), budgetTokens, mode: "within-budget" };
 	}
 	const history = new SelectionHistoryLookup(input.rawHistoryItems);
 	if (!grouped.activeTurn) {
 		const prefixes = grouped.prefixes;
 		let prefixIndex = 0;
 		let evictedHistoryId: string | undefined;
-		let retainedTokens = fullEstimate - residentTokens;
+		let retainedTokens = rawFullEstimate - residentTokens;
 		let notice: UserMessage | undefined;
 		let noticeTokens = 0;
 		let noticeKey: string | undefined;
@@ -470,9 +538,9 @@ export function selectContext(input: ContextSelectionInput): ContextSelection {
 			notice = pagingNotice(budgetTokens, evictedHistoryId);
 			noticeTokens = messageEstimate(notice, tokenCache);
 		};
-		while (residentTokens + retainedTokens + noticeTokens > budgetTokens) {
+		while (calibrated(residentTokens + retainedTokens + noticeTokens) > budgetTokens) {
 			if (prefixIndex === prefixes.length) {
-				const estimatedTokens = residentTokens + retainedTokens + noticeTokens;
+				const estimatedTokens = reported(residentTokens + retainedTokens + noticeTokens);
 				throw error("RESIDENT_INPUT_TOO_LARGE", `Resident and paging-notice estimate ${estimatedTokens} exceeds budget estimate ${budgetTokens}.`, residentTokens, estimatedTokens, budgetTokens);
 			}
 			const evicted = prefixes[prefixIndex++]!;
@@ -483,12 +551,15 @@ export function selectContext(input: ContextSelectionInput): ContextSelection {
 			updateNotice();
 		}
 		const messages = [...(notice ? [notice] : []), ...prefixes.slice(prefixIndex).flatMap((unit) => unit.messages)];
-		return { messages, estimatedTokens: residentTokens + retainedTokens + noticeTokens, budgetTokens, mode: "paged" };
+		return { messages, estimatedTokens: reported(residentTokens + retainedTokens + noticeTokens), budgetTokens, mode: "paged" };
 	}
 
-	const activeRequestTokens = residentTokens + unitEstimate(grouped.activeTurn.request, tokenCache);
-	if (activeRequestTokens > budgetTokens) {
-		throw error("ACTIVE_REQUEST_TOO_LARGE", `Resident plus active request estimate ${activeRequestTokens} exceeds budget estimate ${budgetTokens}.`, residentTokens, activeRequestTokens, budgetTokens);
+	const activeRequestTokens = residentTokens
+		+ unitEstimate(grouped.activeTurn.request, tokenCache)
+		+ unitEstimate(grouped.activeTurn.trailingOutgoing, tokenCache);
+	if (calibrated(activeRequestTokens) > budgetTokens) {
+		const estimatedTokens = reported(activeRequestTokens);
+		throw error("ACTIVE_REQUEST_TOO_LARGE", `Resident plus active request estimate ${estimatedTokens} exceeds budget estimate ${budgetTokens}.`, residentTokens, estimatedTokens, budgetTokens);
 	}
 
 	const prefixes = grouped.prefixes;
@@ -501,7 +572,7 @@ export function selectContext(input: ContextSelectionInput): ContextSelection {
 	const protectedExchangeIndex = protectedExchange ? exchanges.indexOf(protectedExchange) : -1;
 	let evictedHistoryId: string | undefined;
 	let evictedToolReference: ToolRecoveryReference | undefined;
-	let retainedTokens = fullEstimate - residentTokens;
+	let retainedTokens = rawFullEstimate - residentTokens;
 	let notice: UserMessage | undefined;
 	let noticeTokens = 0;
 	let noticeKey: string | undefined;
@@ -511,6 +582,7 @@ export function selectContext(input: ContextSelectionInput): ContextSelection {
 		...completedTurns.slice(completedTurnIndex).flatMap((unit) => unit.messages),
 		...grouped.activeTurn!.request,
 		...exchanges.slice(exchangeIndex).flatMap((exchange) => exchange.messages),
+		...grouped.activeTurn!.trailingOutgoing,
 	];
 	const updateNotice = () => {
 		const nextKey = pagingNoticeKey(evictedHistoryId, evictedToolReference);
@@ -527,7 +599,7 @@ export function selectContext(input: ContextSelectionInput): ContextSelection {
 		updateNotice();
 	};
 
-	while (residentTokens + retainedTokens + noticeTokens > budgetTokens) {
+	while (calibrated(residentTokens + retainedTokens + noticeTokens) > budgetTokens) {
 		if (prefixIndex < prefixes.length) {
 			const evicted = prefixes[prefixIndex++]!;
 			retainedTokens -= unitEstimate(evicted.messages, tokenCache);
@@ -549,22 +621,23 @@ export function selectContext(input: ContextSelectionInput): ContextSelection {
 		if (protectedExchange) {
 			const overflowNotice = protectedOverflowNotice(budgetTokens);
 			const overflowEstimate = residentTokens + retainedTokens + messageEstimate(overflowNotice, tokenCache);
-			if (overflowEstimate <= modelLimit) {
-				return { messages: messagesFor(overflowNotice), estimatedTokens: overflowEstimate, budgetTokens, mode: "protected-overflow" };
+			if (calibrated(overflowEstimate) <= modelLimit) {
+				return { messages: messagesFor(overflowNotice), estimatedTokens: reported(overflowEstimate), budgetTokens, mode: "protected-overflow" };
 			}
 			const replacement = recoveredProtectedExchange(protectedExchange, history);
 			exchanges[protectedExchangeIndex] = replacement;
 			retainedTokens += unitEstimate(replacement.messages, tokenCache) - unitEstimate(protectedExchange.messages, tokenCache);
 			const recovery = recoveryNotice();
 			const recoveredEstimate = residentTokens + retainedTokens + messageEstimate(recovery, tokenCache);
-			if (recoveredEstimate <= modelLimit) {
-				return { messages: messagesFor(recovery), estimatedTokens: recoveredEstimate, budgetTokens, mode: "recovery" };
+			if (calibrated(recoveredEstimate) <= modelLimit) {
+				return { messages: messagesFor(recovery), estimatedTokens: reported(recoveredEstimate), budgetTokens, mode: "recovery" };
 			}
-			throw error("ACTIVE_REQUEST_TOO_LARGE", `Protected exchange recovery estimate ${recoveredEstimate} exceeds model context estimate ${input.modelContextWindow}.`, residentTokens, recoveredEstimate, budgetTokens);
+			const estimatedTokens = reported(recoveredEstimate);
+			throw error("ACTIVE_REQUEST_TOO_LARGE", `Protected exchange recovery estimate ${estimatedTokens} exceeds model context estimate ${input.modelContextWindow}.`, residentTokens, estimatedTokens, budgetTokens);
 		}
-		const estimatedTokens = residentTokens + retainedTokens + noticeTokens;
+		const estimatedTokens = reported(residentTokens + retainedTokens + noticeTokens);
 		throw error("ACTIVE_REQUEST_TOO_LARGE", `Resident plus active request estimate ${estimatedTokens} exceeds budget estimate ${budgetTokens}.`, residentTokens, estimatedTokens, budgetTokens);
 	}
 
-	return { messages: messagesFor(notice), estimatedTokens: residentTokens + retainedTokens + noticeTokens, budgetTokens, mode: "paged" };
+	return { messages: messagesFor(notice), estimatedTokens: reported(residentTokens + retainedTokens + noticeTokens), budgetTokens, mode: "paged" };
 }

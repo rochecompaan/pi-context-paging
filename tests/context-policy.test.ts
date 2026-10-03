@@ -14,6 +14,8 @@ type SelectionOverrides = {
 	modelContextWindow?: number;
 	tokenBudget?: number;
 	rawHistoryItems?: HistoryItem[];
+	contextTokens?: number;
+	outgoingOnly?: readonly boolean[];
 };
 
 const user = (content: string) => ({ role: "user" as const, content, timestamp: 0 });
@@ -31,6 +33,12 @@ const toolAssistant = (...calls: ReturnType<typeof toolCall>[]) => ({
 	content: calls,
 	timestamp: 0,
 });
+const interruptedAssistant = (stopReason: "aborted" | "error", ...calls: ReturnType<typeof toolCall>[]) => ({
+	role: "assistant" as const,
+	content: calls,
+	stopReason,
+	timestamp: 0,
+});
 const result = (toolCallId: string, text: string, toolName = "read") => ({
 	role: "toolResult" as const,
 	toolCallId,
@@ -45,6 +53,8 @@ const selected = (
 		modelContextWindow = 100_000,
 		tokenBudget = LEGACY_TEST_TOKEN_BUDGET,
 		rawHistoryItems,
+		contextTokens,
+		outgoingOnly,
 	}: SelectionOverrides = {},
 ) => selectContext({
 	messages: messages as any,
@@ -53,6 +63,8 @@ const selected = (
 	modelContextWindow,
 	tokenBudget,
 	rawHistoryItems,
+	contextTokens,
+	outgoingOnly,
 });
 const marker = (message: any): string => typeof message.content === "string"
 	? message.content
@@ -61,21 +73,57 @@ const hasMarker = (messages: readonly object[], value: string) => messages.some(
 const rolesAndMarkers = (messages: readonly any[]) => messages.map((message) => [message.role, marker(message)]);
 const repeat = (markerText: string, length: number) => `${markerText} ${"x".repeat(length)}`;
 
+test("keeps measured within-budget input despite a larger heuristic", () => {
+	const messages = [
+		user(repeat("old request", 300_000)),
+		assistant(repeat("old answer", 300_000)),
+		user("active request"),
+	];
+	const selection = selected(messages, {
+		modelContextWindow: 272_000,
+		tokenBudget: 128_000,
+		contextTokens: 119_430,
+	});
+
+	assert.equal(selection.mode, "within-budget");
+	assert.equal(selection.estimatedTokens, 119_430);
+	assert.deepEqual(selection.messages, messages);
+});
+
+test("keeps a persistent request with its outgoing-only instruction", () => {
+	const old = user(repeat("old", 1_000));
+	const actual = user(repeat("actual", 800));
+	const injected = user("extension instruction");
+	assert.throws(
+		() => selected([old, actual, injected], { tokenBudget: 130, outgoingOnly: [false, false, true] }),
+		(error: unknown) => error instanceof ContextSelectionError && error.code === "ACTIVE_REQUEST_TOO_LARGE",
+	);
+});
+
+test("treats outgoing system/tool metadata as resident input rather than a second message estimate", () => {
+	const request = user("next");
+	const metadata = { role: "system", content: "s".repeat(20), toolsAdded: [{ name: "t" }] };
+	const withoutMetadata = selected([request]);
+	const withMetadata = selected([metadata, request], { tokenBudget: withoutMetadata.estimatedTokens });
+	assert.equal(withMetadata.estimatedTokens, withoutMetadata.estimatedTokens);
+	assert.deepEqual(withMetadata.messages, [metadata, request]);
+	assert.equal(withMetadata.mode, "within-budget");
+});
+
 // This test fails if accounting changes from Pi's exported estimator to byte or character counting.
 test("accounts resident inputs and canonical messages with Pi estimates", () => {
 	const messages = [
 		user("request  😀  {\"spacing\":  true}"),
 		assistant("answer\n\nwith JSON: {\"ok\":true}"),
 	];
-	const systemMessage = user("system prompt\t😀");
-	const toolMessage = user(JSON.stringify([{ name: "read", description: "Read", parameters: { type: "object" } }]));
-	const expected = estimateTokens(systemMessage)
-		+ estimateTokens(toolMessage)
+	const systemPrompt = "system prompt\t😀";
+	const tools = [{ name: "read", description: "Read", parameters: { type: "object" } }];
+	const expected = Math.ceil((systemPrompt.length + JSON.stringify(tools).length) / 4)
 		+ messages.reduce((total, message) => total + estimateTokens(message as any), 0);
 	const selection = selectContext({
 		messages: messages as any,
-		systemPrompt: systemMessage.content,
-		activeTools: [{ name: "read", description: "Read", parameters: { type: "object" } }],
+		systemPrompt,
+		activeTools: tools,
 		modelContextWindow: 100_000,
 		tokenBudget: LEGACY_TEST_TOKEN_BUDGET,
 	});
@@ -91,6 +139,37 @@ test("accounts resident inputs and canonical messages with Pi estimates", () => 
 		modelContextWindow: 32_000,
 		tokenBudget: DEFAULT_CONTEXT_TOKEN_BUDGET,
 	}).budgetTokens, 32_000);
+});
+
+test("evicts an old completed turn when measured usage exceeds the budget", () => {
+	const messages = [
+		user(repeat("old request", 40_000)),
+		assistant(repeat("old answer", 40_000)),
+		user("active request"),
+	];
+	const selection = selected(messages, { contextTokens: 70_000 });
+
+	assert.equal(selection.mode, "paged");
+	assert.equal(hasMarker(selection.messages, "old request"), false);
+	assert.equal(hasMarker(selection.messages, "old answer"), false);
+	assert.equal(hasMarker(selection.messages, "active request"), true);
+});
+
+
+test("uses observed usage instead of an oversized resident heuristic", () => {
+	const messages = [user("active request")];
+	const selection = selectContext({
+		messages: messages as any,
+		systemPrompt: repeat("incorrectly large resident estimate", 300_000),
+		activeTools: [],
+		modelContextWindow: 100_000,
+		tokenBudget: LEGACY_TEST_TOKEN_BUDGET,
+		contextTokens: 1_000,
+	});
+
+	assert.equal(selection.mode, "within-budget");
+	assert.equal(selection.estimatedTokens, 1_000);
+	assert.deepEqual(selection.messages, messages);
 });
 
 test("uses an explicit token budget when model context metadata is absent", () => {
@@ -135,7 +214,7 @@ test("matches Pi 0.85.1 user-image estimation", () => {
 test("removes prefix summaries and completed turns before later user turns", () => {
 	const messages = [
 		{ role: "compactionSummary", summary: repeat("PREFIX_SUMMARY", 100_000), timestamp: 0 },
-		user(repeat("old request", 160_000)),
+		user(repeat("old request", 300_000)),
 		assistant(repeat("old answer", 160_000)),
 		user("new request"),
 		assistant("new answer"),
@@ -265,6 +344,112 @@ test("rejects orphan results and incomplete older exchanges", () => {
 	);
 });
 
+test("keeps active-request provenance aligned after omitting interrupted exchanges", () => {
+	for (const stopReason of ["aborted", "error"] as const) {
+		for (const resultCount of [0, 1, 2]) {
+			const old = user(repeat("old request", 1_000));
+			const failed = interruptedAssistant(stopReason, toolCall("failed-a"), toolCall("failed-b"));
+			const results = [result("failed-a", "first"), result("failed-b", "second")].slice(0, resultCount);
+			const actual = user(repeat("actual request", 800));
+			const injected = user("extension instruction");
+			const messages = [old, failed, ...results, actual, injected];
+			const outgoingOnly = messages.map((message) => message === injected);
+			const before = structuredClone({ messages, outgoingOnly });
+			assert.deepEqual(selected(messages, { outgoingOnly }).messages, [old, actual, injected]);
+			assert.throws(
+				() => selected(messages, { tokenBudget: 130, outgoingOnly }),
+				(error: unknown) => error instanceof ContextSelectionError && error.code === "ACTIVE_REQUEST_TOO_LARGE",
+			);
+			const paged = selected(messages, { tokenBudget: 350, outgoingOnly });
+			assert.equal(paged.mode, "paged");
+			assert.equal(hasMarker(paged.messages, "old request"), false);
+			assert.equal(paged.messages.includes(actual), true);
+			assert.equal(paged.messages.includes(injected), true);
+			assert.deepEqual({ messages, outgoingOnly }, before);
+		}
+	}
+});
+
+test("subtracts omitted interrupted exchanges from measured context without losing calibration", () => {
+	for (const stopReason of ["aborted", "error"] as const) {
+		const request = user("active request");
+		const failed = interruptedAssistant(stopReason, toolCall("failed-a"), toolCall("failed-b"));
+		const results = [result("failed-a", repeat("first", 1_000)), result("failed-b", "second")];
+		const messages = [request, failed, ...results];
+		const removedTokens = [failed, ...results].reduce((total, message) => total + estimateTokens(message as any), 0);
+		const contextTokens = 1_000;
+		const selection = selected(messages, { contextTokens, tokenBudget: contextTokens - removedTokens });
+		assert.equal(selection.mode, "within-budget");
+		assert.deepEqual(selection.messages, [request]);
+		assert.equal(selection.estimatedTokens, contextTokens - removedTokens);
+	}
+});
+
+test("omits interrupted exchanges before within-budget provider selection", () => {
+	for (const stopReason of ["aborted", "error"] as const) {
+		const failed = interruptedAssistant(stopReason, toolCall(`${stopReason}-call-a`), toolCall(`${stopReason}-call-b`));
+		const results = [
+			result(`${stopReason}-call-a`, "first actual result"),
+			result(`${stopReason}-call-b`, "second actual result"),
+		];
+		const messages = [failed, ...results, user("continue")];
+		const before = structuredClone(messages);
+		const selection = selected(messages);
+
+		assert.deepEqual(selection.messages, [messages.at(-1)]);
+		assert.deepEqual(messages, before);
+	}
+});
+
+test("omits failed text and partial tool exchanges before paging each context segment", () => {
+	const prefixFailed = interruptedAssistant("aborted", toolCall("prefix-call"));
+	const completedFailed = interruptedAssistant("error", toolCall("completed-call"));
+	const activeFailed = interruptedAssistant("aborted", toolCall("active-call"));
+	const failedText = { ...assistant("partial text"), stopReason: "error" as const };
+	const messages = [
+		prefixFailed,
+		result("prefix-call", "PREFIX_FAILED_RESULT"),
+		user(repeat("old request", 300_000)),
+		completedFailed,
+		user("active request"),
+		failedText,
+		activeFailed,
+		result("active-call", "ACTIVE_FAILED_RESULT"),
+	];
+	const selection = selected(messages, { modelContextWindow: 100_000 });
+
+	assert.equal(selection.mode, "paged");
+	assert.equal(selection.messages.some((message: unknown) => message === prefixFailed || message === completedFailed || message === activeFailed || message === failedText), false);
+	assert.equal(selection.messages.some((message) => message.role === "toolResult"), false);
+	assert.equal(hasMarker(selection.messages, "active request"), true);
+});
+
+test("validates actual results from interrupted exchanges before omitting them", () => {
+	for (const messages of [
+		[
+			user("active"),
+			interruptedAssistant("aborted", toolCall("duplicate-call")),
+			result("duplicate-call", "first"),
+			result("duplicate-call", "second"),
+		],
+		[
+			user("active"),
+			interruptedAssistant("error", toolCall("expected-call")),
+			result("wrong-call", "wrong"),
+		],
+		[
+			interruptedAssistant("error"),
+			user("next request"),
+			result("unowned-call", "orphan"),
+		],
+	]) {
+		assert.throws(
+			() => selected(messages),
+			(error: unknown) => error instanceof ContextSelectionError && error.code === "INVALID_MESSAGE_STRUCTURE",
+		);
+	}
+});
+
 test("preserves a complete output larger than 16,000 bytes", () => {
 	const output = `LARGE_OUTPUT ${"😀JSON {\"value\": true}\n".repeat(5_000)}`;
 	const messages = [user("active"), toolAssistant(toolCall("large")), result("large", output)];
@@ -347,12 +532,16 @@ test("keeps a protected unread trailing parallel tool exchange for one follow-up
 		metadata: { tools: ["read", "read"], files: [], failed: false },
 	}];
 
+	const rawFullEstimate = estimateTokens(user("resident prompt"))
+		+ estimateTokens(user(JSON.stringify([])))
+		+ messages.reduce((total, message) => total + estimateTokens(message as any), 0);
 	const selection = selectContext({
 		messages: messages as any,
 		systemPrompt: "resident prompt",
 		activeTools: [],
 		modelContextWindow: 100_000,
 		tokenBudget: 48_000,
+		contextTokens: rawFullEstimate + 100,
 		rawHistoryItems,
 	});
 
@@ -437,12 +626,16 @@ test("recovers an unread protected result above the actual model limit without m
 	}];
 	const rawBefore = structuredClone(rawHistoryItems);
 
+	const rawFullEstimate = estimateTokens(user("resident prompt"))
+		+ estimateTokens(user(JSON.stringify([])))
+		+ messages.reduce((total, message) => total + estimateTokens(message as any), 0);
 	const recovered = selectContext({
 		messages: messages as any,
 		systemPrompt: "resident prompt",
 		activeTools: [],
 		modelContextWindow: 70_000,
 		tokenBudget: LEGACY_TEST_TOKEN_BUDGET,
+		contextTokens: rawFullEstimate + 100,
 		rawHistoryItems,
 	});
 	const recoveredResult = recovered.messages.find((message: any) => message.role === "toolResult") as any;
@@ -465,7 +658,8 @@ test("recovers an unread protected result above the actual model limit without m
 		recovered.estimatedTokens,
 		estimateTokens(user("resident prompt"))
 			+ estimateTokens(user(JSON.stringify([])))
-			+ recovered.messages.reduce((total, message) => total + estimateTokens(message as any), 0),
+			+ recovered.messages.reduce((total, message) => total + estimateTokens(message as any), 0)
+			+ 100,
 	);
 	assert.deepEqual(messages, canonicalBefore);
 	assert.deepEqual(rawHistoryItems, rawBefore);

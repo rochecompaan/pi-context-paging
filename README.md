@@ -56,8 +56,11 @@ Load tools return exact stored content without automatic replacement.
 
 ## How context selection works
 
-The extension counts resident prompt input and canonical conversation messages.
-If the request fits, the extension sends the canonical messages unchanged.
+The extension uses tracked provider usage when it has a valid response anchor. Otherwise, it estimates the request.
+Resident prompt input and tool schemas contribute once.
+Before selection, it omits aborted or errored assistant exchanges from provider input.
+Those exchanges and their actual results remain available through the recovery tools.
+If the remaining request fits, the extension sends it without paging.
 If it does not fit, the extension removes the oldest complete eligible exchange first.
 The active request and unread trailing tool results remain protected.
 A paging notice gives recovery references for removed history.
@@ -66,6 +69,14 @@ The extension cancels automatic compaction while it is enabled.
 Manual compaction remains available.
 
 Read [the architecture document](docs/architecture.md) for module and lifecycle details.
+
+## Changes in 0.1.1
+
+- Provider-backed accounting handles restored raw history and outgoing-only instructions without counting resident input twice.
+- Raw history retains interrupted turns and actual results. Provider requests omit those exchanges after validating their results.
+- Normal incomplete exchanges and malformed results retain strict validation.
+
+The installation examples still target the published `0.1.0` release. Publication of the `0.1.1` candidate requires separate approval.
 
 ## Development
 
