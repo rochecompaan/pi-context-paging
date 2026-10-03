@@ -13,6 +13,7 @@ const expectedFiles = [
   "docs/architecture.md",
   "package.json",
   "src/context-policy.ts",
+  "src/context-usage.ts",
   "src/history.ts",
   "src/index.ts",
   "src/navigator.ts",
