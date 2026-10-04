@@ -3,7 +3,11 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage, ToolResultMessage, UserMessage } from "@earendil-works/pi-ai";
 import { isInterruptedAssistantMessage, type HistoryItem } from "./history.ts";
 
-export const DEFAULT_CONTEXT_TOKEN_BUDGET = 128_000;
+import { defaultTrimToTokens } from "./settings.ts";
+import { SelectionHistoryLookup } from "./selection-history.ts";
+import { rawCutFrontierResolves, type ContextCutFrontier, type ContextCutSnapshot, type ContextCutFallbackReason } from "./context-cut.ts";
+
+export { DEFAULT_CONTEXT_TOKEN_BUDGET } from "./settings.ts";
 
 export type ResidentToolDefinition = {
 	name: string;
@@ -17,11 +21,14 @@ export type ContextSelectionInput = {
 	activeTools: readonly ResidentToolDefinition[];
 	modelContextWindow: number | undefined;
 	tokenBudget: number;
+	/** FIFO advance destination; omission derives the adaptive target from tokenBudget. */
+	trimToTokens?: number;
 	/** A provider-backed full-context estimate, when its usage basis is known. */
 	contextTokens?: number;
 	/** Messages present only in this outgoing request, not the persistent session branch. */
 	outgoingOnly?: readonly boolean[];
 	rawHistoryItems?: readonly HistoryItem[];
+	cutState?: ContextCutSnapshot;
 };
 
 export type ContextSelectionMode = "within-budget" | "paged" | "protected-overflow" | "recovery";
@@ -31,10 +38,13 @@ export type ContextSelection = {
 	estimatedTokens: number;
 	budgetTokens: number;
 	mode: ContextSelectionMode;
+	cutState: ContextCutSnapshot | undefined;
+	cutFallbackReason?: ContextCutFallbackReason;
 };
 
 export type ContextSelectionErrorCode =
 	| "INVALID_TOKEN_BUDGET"
+	| "INVALID_TRIM_TARGET"
 	| "INVALID_MODEL_CONTEXT"
 	| "RESIDENT_INPUT_TOO_LARGE"
 	| "ACTIVE_REQUEST_TOO_LARGE"
@@ -62,6 +72,7 @@ export class ContextSelectionError extends Error {
 	}
 }
 
+// Canonical grouping and normalization. Validate the whole input before applying a boundary.
 type ToolExchange = {
 	assistant: AssistantMessage;
 	results: ToolResultMessage[];
@@ -69,7 +80,7 @@ type ToolExchange = {
 };
 
 type PrefixUnit = { kind: "prefix"; messages: AgentMessage[] };
-type CompletedTurnUnit = { kind: "completedTurn"; messages: AgentMessage[] };
+type CompletedTurnUnit = { kind: "completedTurn"; messages: AgentMessage[]; anchorMessages?: readonly AgentMessage[] };
 type RequestMessage = UserMessage | Extract<AgentMessage, { role: "custom" }>;
 
 type ActiveTurnUnit = {
@@ -227,7 +238,9 @@ function requestEnvelope(messages: readonly AgentMessage[], start: number, outgo
 
 function groupContext(messages: readonly AgentMessage[], outgoingOnly: readonly boolean[]): GroupedContext {
 	const requestIndexes = requestStartIndexes(messages, outgoingOnly);
-	if (requestIndexes.length === 0) return { prefixes: unitsForSegment(messages).map((messages) => ({ kind: "prefix", messages })) } as GroupedContext;
+	if (requestIndexes.length === 0) return {
+		prefixes: unitsForSegment(messages).map((messages) => ({ kind: "prefix", messages })), completedTurns: [],
+	};
 
 	const prefixes = unitsForSegment(messages.slice(0, requestIndexes[0]))
 		.map((messages) => ({ kind: "prefix" as const, messages }));
@@ -260,6 +273,7 @@ function groupContext(messages: readonly AgentMessage[], outgoingOnly: readonly 
 	return { prefixes, completedTurns, activeTurn: { kind: "activeTurn", request, exchanges, trailingOutgoing } };
 }
 
+// Per-call estimates and generated notices; these never enter the cross-call state.
 type TokenCache = {
 	messages: Map<AgentMessage, number>;
 	units: WeakMap<readonly AgentMessage[], number>;
@@ -281,93 +295,6 @@ function unitEstimate(messages: readonly AgentMessage[], cache: TokenCache): num
 	const estimate = messages.reduce((total, message) => total + messageEstimate(message, cache), 0);
 	cache.units.set(messages, estimate);
 	return estimate;
-}
-
-type ModelTurnHistoryItem = Extract<HistoryItem, { kind: "modelTurn" }>;
-type FallbackHistoryMessage = { message: AgentMessage; historyId: string };
-type FallbackHistoryBucket = {
-	messages: FallbackHistoryMessage[];
-	serializedIds?: Map<string, string>;
-};
-
-function historyFallbackBucket(message: AgentMessage): string {
-	return `${message.role}\u0000${message.timestamp}`;
-}
-
-// This stays local because it only supports one selectContext invocation.
-class SelectionHistoryLookup {
-	private readonly identities = new Map<AgentMessage, string>();
-	private readonly toolTurns = new Map<string, ModelTurnHistoryItem>();
-	private readonly fallbackBuckets = new Map<string, FallbackHistoryBucket>();
-	private readonly serializations = new Map<AgentMessage, string>();
-	private readonly items: readonly HistoryItem[] | undefined;
-
-	constructor(items: readonly HistoryItem[] | undefined) {
-		this.items = items;
-		for (const item of items ?? []) {
-			if (item.kind === "user") {
-				this.addMessage(item.userMessage, item.id);
-				continue;
-			}
-			this.addMessage(item.assistantMessage, item.id);
-			for (const call of item.assistantMessage.content.filter(isToolCallBlock)) {
-				this.toolTurns.set(call.id, item);
-			}
-			for (const result of item.toolResults) this.addMessage(result, item.id);
-		}
-	}
-
-	historyId(message: AgentMessage): string | undefined {
-		const identity = this.identities.get(message);
-		if (identity !== undefined) return identity;
-		const toolTurn = this.toolTurn(message);
-		if (toolTurn) return toolTurn.id;
-		const bucket = this.fallbackBuckets.get(historyFallbackBucket(message));
-		if (!bucket) return undefined;
-		const serialized = this.serialize(message);
-		return this.serializedIds(bucket).get(serialized);
-	}
-
-	toolTurn(message: AgentMessage): ModelTurnHistoryItem | undefined {
-		if (message.role === "toolResult") return this.toolTurns.get(message.toolCallId);
-		if (message.role !== "assistant") return undefined;
-		return message.content.filter(isToolCallBlock)
-			.map((call) => this.toolTurns.get(call.id))
-			.find((turn): turn is ModelTurnHistoryItem => turn !== undefined);
-	}
-
-	isLastItem(item: HistoryItem): boolean {
-		return this.items?.at(-1) === item;
-	}
-
-	private addMessage(message: AgentMessage, historyId: string): void {
-		if (!this.identities.has(message)) this.identities.set(message, historyId);
-		const key = historyFallbackBucket(message);
-		const bucket = this.fallbackBuckets.get(key) ?? { messages: [] };
-		bucket.messages.push({ message, historyId });
-		this.fallbackBuckets.set(key, bucket);
-	}
-
-	private serializedIds(bucket: FallbackHistoryBucket): Map<string, string> {
-		if (bucket.serializedIds) return bucket.serializedIds;
-		const serializedIds = new Map<string, string>();
-		for (const candidate of bucket.messages) {
-			const serialized = this.serialize(candidate.message);
-			if (!serializedIds.has(serialized)) {
-				serializedIds.set(serialized, candidate.historyId);
-			}
-		}
-		bucket.serializedIds = serializedIds;
-		return serializedIds;
-	}
-
-	private serialize(message: AgentMessage): string {
-		const cached = this.serializations.get(message);
-		if (cached !== undefined) return cached;
-		const serialized = JSON.stringify(message);
-		this.serializations.set(message, serialized);
-		return serialized;
-	}
 }
 
 function pagingNotice(
@@ -483,7 +410,24 @@ function validContextTokens(value: unknown): value is number {
 	return typeof value === "number" && Number.isFinite(value) && value >= 0;
 }
 
-export function selectContext(input: ContextSelectionInput): ContextSelection {
+export type ContextTokenLimits = {
+	budgetTokens: number;
+	trimToTokens: number;
+	modelLimit: number;
+};
+
+function scaledTrimTarget(target: number, configuredBudget: number, budgetTokens: number): number {
+	if (target >= configuredBudget) return budgetTokens;
+	const scaled = Number.isSafeInteger(budgetTokens)
+		? Number(BigInt(target) * BigInt(budgetTokens) / BigInt(configuredBudget))
+		: Math.floor(target / configuredBudget * budgetTokens);
+	return Math.max(1, scaled);
+}
+
+/** Validates configured limits and computes their effective model-window values. */
+export function contextTokenLimits(
+	input: Pick<ContextSelectionInput, "tokenBudget" | "trimToTokens" | "modelContextWindow">,
+): ContextTokenLimits {
 	if (
 		input.modelContextWindow !== undefined
 		&& (!Number.isFinite(input.modelContextWindow) || input.modelContextWindow <= 0)
@@ -493,151 +437,245 @@ export function selectContext(input: ContextSelectionInput): ContextSelection {
 	if (!Number.isSafeInteger(input.tokenBudget) || input.tokenBudget <= 0) {
 		throw error("INVALID_TOKEN_BUDGET", "The token budget must be a positive safe integer.", 0, 0, 0);
 	}
+	const trimToTokens = input.trimToTokens === undefined
+		? defaultTrimToTokens(input.tokenBudget)
+		: input.trimToTokens;
+	if (!Number.isSafeInteger(trimToTokens) || trimToTokens <= 0) {
+		throw error("INVALID_TRIM_TARGET", "The trim target must be a positive safe integer.", 0, 0, 0);
+	}
 	const budgetTokens = input.modelContextWindow === undefined
 		? input.tokenBudget
 		: Math.min(input.tokenBudget, input.modelContextWindow);
-	const modelLimit = input.modelContextWindow ?? Number.POSITIVE_INFINITY;
+	return {
+		budgetTokens,
+		trimToTokens: scaledTrimTarget(trimToTokens, input.tokenBudget, budgetTokens),
+		modelLimit: input.modelContextWindow ?? Number.POSITIVE_INFINITY,
+	};
+}
+
+// Remembered boundaries are resolved in the original validated groups before any exclusion.
+function applyCutFrontier(
+	grouped: GroupedContext, frontier: ContextCutFrontier, history: SelectionHistoryLookup,
+	outgoing: ReadonlyMap<AgentMessage, boolean>,
+): GroupedContext | undefined {
+	const matches = (messages: readonly AgentMessage[]) => messages.filter((message) => history.matchesCutKey(message, frontier.lastEvicted));
+	if (frontier.kind === "prefix" || frontier.kind === "completedTurn") {
+		const units = frontier.kind === "prefix" ? grouped.prefixes : grouped.completedTurns;
+		const indexes = units.flatMap((unit, index) => matches(unit.messages).map(() => index));
+		if (indexes.length !== 1) return undefined;
+		return frontier.kind === "prefix"
+			? { ...grouped, prefixes: grouped.prefixes.slice(indexes[0]! + 1) }
+			: { ...grouped, prefixes: [], completedTurns: grouped.completedTurns.slice(indexes[0]! + 1) };
+	}
+	// The prefix/completed variant shares a kind union; narrow the partial variant explicitly.
+	if (frontier.kind !== "partialTurn") return undefined;
+	const candidates: { completedIndex?: number; exchangeIndex?: number; messageIndex?: number }[] = [];
+	grouped.completedTurns.forEach((unit, completedIndex) => unit.messages.forEach((message, messageIndex) => {
+		if (message.role === "assistant" && history.matchesCutKey(message, frontier.lastEvicted)) candidates.push({ completedIndex, messageIndex });
+	}));
+	grouped.activeTurn?.exchanges.forEach((exchange, exchangeIndex) => {
+		if (history.matchesCutKey(exchange.assistant, frontier.lastEvicted)) candidates.push({ exchangeIndex });
+	});
+	if (candidates.length !== 1) return undefined;
+	const point = candidates[0]!;
+	if (point.completedIndex !== undefined) {
+		const original = grouped.completedTurns[point.completedIndex]!;
+		const flags = original.messages.map((message) => outgoing.get(message) ?? false);
+		const request = requestEnvelope(original.messages, 0, flags);
+		if (frontier.userHistoryId !== undefined && history.cutKey(request[0]!)?.historyId !== frontier.userHistoryId) return undefined;
+		const nextIndex = exchangeAt(original.messages, point.messageIndex!).nextIndex;
+		const trailing = original.messages.slice(request.length).filter((message) => outgoing.get(message));
+		const remaining = original.messages.slice(nextIndex).filter((message) => !outgoing.get(message));
+		const remainder: CompletedTurnUnit = { kind: "completedTurn", messages: [...request, ...remaining, ...trailing], anchorMessages: original.messages };
+		return { ...grouped, prefixes: [], completedTurns: [remainder, ...grouped.completedTurns.slice(point.completedIndex + 1)] };
+	}
+	const active = grouped.activeTurn!;
+	if (frontier.userHistoryId !== undefined && history.cutKey(active.request[0]!)?.historyId !== frontier.userHistoryId) return undefined;
+	return { prefixes: [], completedTurns: [], activeTurn: { ...active, exchanges: active.exchanges.slice(point.exchangeIndex! + 1) } };
+}
+
+type EvictionUnit = {
+	kind: "prefix" | "completedTurn" | "partialTurn";
+	messages: AgentMessage[];
+	anchorMessages: readonly AgentMessage[];
+};
+type SelectionView = { grouped: GroupedContext; units: EvictionUnit[]; activeStart: number };
+type KeyedBoundary = { count: number; frontier: ContextCutFrontier; notice: UserMessage; rawEstimate: number };
+type FifoSelection = {
+	selection: ContextSelection;
+	normalNotice?: UserMessage;
+	removedCount: number;
+	lastKeyed?: KeyedBoundary;
+	lastWasKeyless: boolean;
+	cutFailure?: ContextCutFallbackReason;
+};
+
+function selectionView(grouped: GroupedContext): SelectionView {
+	const units: EvictionUnit[] = [
+		...grouped.prefixes.map((unit) => ({ ...unit, anchorMessages: unit.messages })),
+		...grouped.completedTurns.map((unit) => ({ ...unit, anchorMessages: unit.anchorMessages ?? unit.messages })),
+	];
+	const activeStart = units.length;
+	for (const exchange of grouped.activeTurn?.exchanges ?? []) units.push({ kind: "partialTurn", messages: exchange.messages, anchorMessages: [exchange.assistant] });
+	return { grouped, units, activeStart };
+}
+
+function viewMessages(view: SelectionView, count: number, notice?: UserMessage, replacement?: ToolExchange): AgentMessage[] {
+	const active = view.grouped.activeTurn;
+	const tail = view.units.slice(Math.max(count, view.activeStart));
+	return [
+		...(notice ? [{ ...notice }] : []),
+		...view.units.slice(count, view.activeStart).flatMap((unit) => unit.messages),
+		...(active?.request ?? []),
+		...tail.flatMap((unit) => replacement && unit.messages[0] === replacement.assistant ? replacement.messages : unit.messages),
+		...(active?.trailingOutgoing ?? []),
+	];
+}
+
+function unitFrontier(
+	unit: EvictionUnit, view: SelectionView, history: SelectionHistoryLookup, outgoing: ReadonlyMap<AgentMessage, boolean>,
+): { frontier?: ContextCutFrontier; failed: boolean } {
+	for (let index = unit.anchorMessages.length - 1; index >= 0; index--) {
+		const message = unit.anchorMessages[index]!;
+		if (message.role !== "assistant" && message.role !== "user") continue;
+		const key = history.cutKey(message);
+		if (!key) {
+			if (outgoing.get(message)) continue;
+			return { failed: true };
+		}
+		if (unit.kind !== "partialTurn") return { frontier: { kind: unit.kind, lastEvicted: key }, failed: false };
+		const owner = view.grouped.activeTurn!.request.find((request) => request.role === "user");
+		const userHistoryId = owner ? history.cutKey(owner)?.historyId : undefined;
+		return { frontier: { kind: "partialTurn", lastEvicted: key, ...(userHistoryId ? { userHistoryId } : {}) }, failed: false };
+	}
+	return { failed: false };
+}
+
+function cutSnapshot(frontier: ContextCutFrontier, notice: UserMessage): ContextCutSnapshot {
+	return Object.freeze({
+		frontier: Object.freeze({ ...frontier, lastEvicted: Object.freeze({ ...frontier.lastEvicted }) }),
+		notice: Object.freeze({ ...notice }),
+	});
+}
+
+// Keep grouping, calibration, notice cost and protected-exchange safety local to this pure selector.
+// Raw lookup and cross-call state are separate modules. One FIFO executor serves target advances
+// and budget-only fallbacks, so their atomicity and safety rules cannot drift.
+export function selectContext(input: ContextSelectionInput): ContextSelection {
+	const { budgetTokens, trimToTokens: targetTokens, modelLimit } = contextTokenLimits(input);
 	const residentTokens = residentTokenEstimate(input);
-	const inputOutgoingOnly = input.outgoingOnly?.length === input.messages.length
-		? input.outgoingOnly
-		: input.messages.map(() => false);
+	const inputOutgoingOnly = input.outgoingOnly?.length === input.messages.length ? input.outgoingOnly : input.messages.map(() => false);
 	const { messages, outgoingOnly } = normalizeInterruptedExchanges(input.messages, inputOutgoingOnly);
 	const grouped = groupContext(messages, outgoingOnly);
-	const tokenCache: TokenCache = { messages: new Map(), units: new WeakMap() };
-	const rawInputEstimate = residentTokens + unitEstimate(input.messages, tokenCache);
-	const rawFullEstimate = messages === input.messages
-		? rawInputEstimate
-		: residentTokens + unitEstimate(messages, tokenCache);
+	const outgoing = new Map(messages.map((message, index) => [message, outgoingOnly[index]!]));
+	const cache: TokenCache = { messages: new Map(), units: new WeakMap() };
+	const rawInputEstimate = residentTokens + unitEstimate(input.messages, cache);
+	const rawFullEstimate = messages === input.messages ? rawInputEstimate : residentTokens + unitEstimate(messages, cache);
 	const contextTokens = validContextTokens(input.contextTokens) ? input.contextTokens : undefined;
-	// Usage describes the incoming snapshot; normalization removes tokens, not its calibration.
+	// Never recalibrate after normalization, remembered exclusions, or a backward snap.
 	const calibration = contextTokens === undefined ? 0 : contextTokens - rawInputEstimate;
-	// Keep one adjustment for this selection so each FIFO removal changes only its own estimate.
-	const calibrated = (rawEstimate: number): number => rawEstimate + calibration;
-	const reported = (rawEstimate: number): number => Math.max(0, calibrated(rawEstimate));
+	const calibrated = (estimate: number) => estimate + calibration;
+	const reported = (estimate: number) => Math.max(0, calibrated(estimate));
 	if (contextTokens === undefined && residentTokens > budgetTokens) {
 		throw error("RESIDENT_INPUT_TOO_LARGE", `Resident input estimate ${residentTokens} exceeds budget estimate ${budgetTokens}.`, residentTokens, residentTokens, budgetTokens);
 	}
-
-	const fullEstimate = calibrated(rawFullEstimate);
-	if (fullEstimate <= budgetTokens) {
-		return { messages, estimatedTokens: reported(rawFullEstimate), budgetTokens, mode: "within-budget" };
+	if (!input.cutState && calibrated(rawFullEstimate) <= budgetTokens) {
+		return { messages, estimatedTokens: reported(rawFullEstimate), budgetTokens, mode: "within-budget", cutState: undefined };
 	}
 	const history = new SelectionHistoryLookup(input.rawHistoryItems);
-	if (!grouped.activeTurn) {
-		const prefixes = grouped.prefixes;
-		let prefixIndex = 0;
-		let evictedHistoryId: string | undefined;
-		let retainedTokens = rawFullEstimate - residentTokens;
-		let notice: UserMessage | undefined;
-		let noticeTokens = 0;
+	const rawView = selectionView(grouped);
+	const requestTokens = (view: SelectionView) => residentTokens
+		+ unitEstimate(view.grouped.activeTurn?.request ?? [], cache)
+		+ unitEstimate(view.grouped.activeTurn?.trailingOutgoing ?? [], cache);
+	const viewEstimate = (view: SelectionView) => requestTokens(view) + view.units.reduce((total, unit) => total + unitEstimate(unit.messages, cache), 0);
+
+	const run = (view: SelectionView, destination: number, previous: ContextCutSnapshot | undefined, stateful: boolean): FifoSelection => {
+		let count = 0;
+		let retained = viewEstimate(view);
+		let notice = previous?.notice;
+		let noticeTokens = notice ? messageEstimate(notice, cache) : 0;
+		let evictedId = previous?.frontier.lastEvicted.historyId;
+		let toolReference: ToolRecoveryReference | undefined;
 		let noticeKey: string | undefined;
-		const updateNotice = () => {
-			const nextKey = pagingNoticeKey(evictedHistoryId, undefined);
-			if (nextKey === noticeKey) return;
-			noticeKey = nextKey;
-			notice = pagingNotice(budgetTokens, evictedHistoryId);
-			noticeTokens = messageEstimate(notice, tokenCache);
+		let lastKeyed: KeyedBoundary | undefined = previous ? { count: 0, frontier: previous.frontier, notice: previous.notice, rawEstimate: retained } : undefined;
+		let lastWasKeyless = false;
+		let cutFailure: ContextCutFallbackReason | undefined;
+		const protectedExchange = unreadTrailingExchange(view.grouped, history);
+		const protectedMessages = protectedExchange?.messages;
+		const finish = (mode: ContextSelectionMode, outgoingNotice = notice, replacement?: ToolExchange): FifoSelection => {
+			const replacementDelta = replacement && protectedExchange
+				? unitEstimate(replacement.messages, cache) - unitEstimate(protectedExchange.messages, cache) : 0;
+			const estimate = retained + replacementDelta + (outgoingNotice ? messageEstimate(outgoingNotice, cache) : 0);
+			return { selection: { messages: viewMessages(view, count, outgoingNotice, replacement), estimatedTokens: reported(estimate), budgetTokens, mode, cutState: undefined },
+				normalNotice: notice, removedCount: count, lastKeyed, lastWasKeyless, cutFailure };
 		};
-		while (calibrated(residentTokens + retainedTokens + noticeTokens) > budgetTokens) {
-			if (prefixIndex === prefixes.length) {
-				const estimatedTokens = reported(residentTokens + retainedTokens + noticeTokens);
-				throw error("RESIDENT_INPUT_TOO_LARGE", `Resident and paging-notice estimate ${estimatedTokens} exceeds budget estimate ${budgetTokens}.`, residentTokens, estimatedTokens, budgetTokens);
-			}
-			const evicted = prefixes[prefixIndex++]!;
-			retainedTokens -= unitEstimate(evicted.messages, tokenCache);
-			for (const message of evicted.messages) {
-				evictedHistoryId = history.historyId(message) ?? evictedHistoryId;
-			}
-			updateNotice();
+		if (calibrated(retained + noticeTokens) <= budgetTokens) return finish(previous ? "paged" : "within-budget");
+		if (view.grouped.activeTurn && calibrated(requestTokens(view)) > budgetTokens) {
+			const estimatedTokens = reported(requestTokens(view));
+			throw error("ACTIVE_REQUEST_TOO_LARGE", `Resident plus active request estimate ${estimatedTokens} exceeds budget estimate ${budgetTokens}.`, residentTokens, estimatedTokens, budgetTokens);
 		}
-		const messages = [...(notice ? [notice] : []), ...prefixes.slice(prefixIndex).flatMap((unit) => unit.messages)];
-		return { messages, estimatedTokens: reported(residentTokens + retainedTokens + noticeTokens), budgetTokens, mode: "paged" };
-	}
-
-	const activeRequestTokens = residentTokens
-		+ unitEstimate(grouped.activeTurn.request, tokenCache)
-		+ unitEstimate(grouped.activeTurn.trailingOutgoing, tokenCache);
-	if (calibrated(activeRequestTokens) > budgetTokens) {
-		const estimatedTokens = reported(activeRequestTokens);
-		throw error("ACTIVE_REQUEST_TOO_LARGE", `Resident plus active request estimate ${estimatedTokens} exceeds budget estimate ${budgetTokens}.`, residentTokens, estimatedTokens, budgetTokens);
-	}
-
-	const prefixes = grouped.prefixes;
-	const completedTurns = grouped.completedTurns;
-	const exchanges = [...grouped.activeTurn.exchanges];
-	let prefixIndex = 0;
-	let completedTurnIndex = 0;
-	let exchangeIndex = 0;
-	const protectedExchange = unreadTrailingExchange(grouped, history);
-	const protectedExchangeIndex = protectedExchange ? exchanges.indexOf(protectedExchange) : -1;
-	let evictedHistoryId: string | undefined;
-	let evictedToolReference: ToolRecoveryReference | undefined;
-	let retainedTokens = rawFullEstimate - residentTokens;
-	let notice: UserMessage | undefined;
-	let noticeTokens = 0;
-	let noticeKey: string | undefined;
-	const messagesFor = (selectionNotice: UserMessage | undefined): AgentMessage[] => [
-		...(selectionNotice ? [selectionNotice] : []),
-		...prefixes.slice(prefixIndex).flatMap((unit) => unit.messages),
-		...completedTurns.slice(completedTurnIndex).flatMap((unit) => unit.messages),
-		...grouped.activeTurn!.request,
-		...exchanges.slice(exchangeIndex).flatMap((exchange) => exchange.messages),
-		...grouped.activeTurn!.trailingOutgoing,
-	];
-	const updateNotice = () => {
-		const nextKey = pagingNoticeKey(evictedHistoryId, evictedToolReference);
-		if (nextKey === noticeKey) return;
-		noticeKey = nextKey;
-		notice = pagingNotice(budgetTokens, evictedHistoryId, evictedToolReference);
-		noticeTokens = messageEstimate(notice, tokenCache);
-	};
-	const remove = (messages: readonly AgentMessage[]) => {
-		for (const message of messages) {
-			evictedHistoryId = history.historyId(message) ?? evictedHistoryId;
-			evictedToolReference ??= toolRecoveryReference(message, history);
+		while (calibrated(retained + noticeTokens) > Math.min(destination, budgetTokens)) {
+			const unit = view.units[count];
+			if (!unit || unit.messages === protectedMessages) {
+				if (calibrated(retained + noticeTokens) <= budgetTokens) return finish("paged");
+				if (protectedExchange) {
+					const overflow = protectedOverflowNotice(budgetTokens);
+					if (calibrated(retained + messageEstimate(overflow, cache)) <= modelLimit) return finish("protected-overflow", overflow);
+					const replacement = recoveredProtectedExchange(protectedExchange, history);
+					const recovery = recoveryNotice();
+					const recovered = retained + unitEstimate(replacement.messages, cache) - unitEstimate(protectedExchange.messages, cache) + messageEstimate(recovery, cache);
+					if (calibrated(recovered) <= modelLimit) return finish("recovery", recovery, replacement);
+					const estimatedTokens = reported(recovered);
+					throw error("ACTIVE_REQUEST_TOO_LARGE", `Protected exchange recovery estimate ${estimatedTokens} exceeds model context estimate ${input.modelContextWindow}.`, residentTokens, estimatedTokens, budgetTokens);
+				}
+				const estimatedTokens = reported(retained + noticeTokens);
+				const code = view.grouped.activeTurn ? "ACTIVE_REQUEST_TOO_LARGE" : "RESIDENT_INPUT_TOO_LARGE";
+				throw error(code, `Resident and retained request estimate ${estimatedTokens} exceeds budget estimate ${budgetTokens}.`, residentTokens, estimatedTokens, budgetTokens);
+			}
+			count++;
+			retained -= unitEstimate(unit.messages, cache);
+			for (const message of unit.messages) {
+				evictedId = history.historyId(message) ?? evictedId;
+				toolReference ??= toolRecoveryReference(message, history);
+			}
+			const nextNoticeKey = pagingNoticeKey(evictedId, toolReference);
+			if (nextNoticeKey !== noticeKey) {
+				notice = pagingNotice(budgetTokens, evictedId, toolReference);
+				noticeTokens = messageEstimate(notice, cache);
+				noticeKey = nextNoticeKey;
+			}
+			if (stateful) {
+				const anchor = unitFrontier(unit, view, history, outgoing);
+				if (anchor.failed) cutFailure ??= "cut-key-unresolved";
+				lastWasKeyless = !anchor.frontier;
+				if (anchor.frontier) lastKeyed = { count, frontier: anchor.frontier, notice: notice!, rawEstimate: retained };
+			}
 		}
-		updateNotice();
+		return finish("paged");
 	};
 
-	while (calibrated(residentTokens + retainedTokens + noticeTokens) > budgetTokens) {
-		if (prefixIndex < prefixes.length) {
-			const evicted = prefixes[prefixIndex++]!;
-			retainedTokens -= unitEstimate(evicted.messages, tokenCache);
-			remove(evicted.messages);
-			continue;
-		}
-		if (completedTurnIndex < completedTurns.length) {
-			const evicted = completedTurns[completedTurnIndex++]!;
-			retainedTokens -= unitEstimate(evicted.messages, tokenCache);
-			remove(evicted.messages);
-			continue;
-		}
-		if (exchangeIndex < exchanges.length && exchangeIndex !== protectedExchangeIndex) {
-			const evicted = exchanges[exchangeIndex++]!;
-			retainedTokens -= unitEstimate(evicted.messages, tokenCache);
-			remove(evicted.messages);
-			continue;
-		}
-		if (protectedExchange) {
-			const overflowNotice = protectedOverflowNotice(budgetTokens);
-			const overflowEstimate = residentTokens + retainedTokens + messageEstimate(overflowNotice, tokenCache);
-			if (calibrated(overflowEstimate) <= modelLimit) {
-				return { messages: messagesFor(overflowNotice), estimatedTokens: reported(overflowEstimate), budgetTokens, mode: "protected-overflow" };
-			}
-			const replacement = recoveredProtectedExchange(protectedExchange, history);
-			exchanges[protectedExchangeIndex] = replacement;
-			retainedTokens += unitEstimate(replacement.messages, tokenCache) - unitEstimate(protectedExchange.messages, tokenCache);
-			const recovery = recoveryNotice();
-			const recoveredEstimate = residentTokens + retainedTokens + messageEstimate(recovery, tokenCache);
-			if (calibrated(recoveredEstimate) <= modelLimit) {
-				return { messages: messagesFor(recovery), estimatedTokens: reported(recoveredEstimate), budgetTokens, mode: "recovery" };
-			}
-			const estimatedTokens = reported(recoveredEstimate);
-			throw error("ACTIVE_REQUEST_TOO_LARGE", `Protected exchange recovery estimate ${estimatedTokens} exceeds model context estimate ${input.modelContextWindow}.`, residentTokens, estimatedTokens, budgetTokens);
-		}
-		const estimatedTokens = reported(residentTokens + retainedTokens + noticeTokens);
-		throw error("ACTIVE_REQUEST_TOO_LARGE", `Resident plus active request estimate ${estimatedTokens} exceeds budget estimate ${budgetTokens}.`, residentTokens, estimatedTokens, budgetTokens);
+	const fallback = (reason: ContextCutFallbackReason): ContextSelection => ({
+		...run(rawView, budgetTokens, undefined, false).selection, cutState: undefined, cutFallbackReason: reason,
+	});
+	if (!input.rawHistoryItems) return fallback("raw-history-unavailable");
+	const remembered = input.cutState;
+	let view = rawView;
+	if (remembered) {
+		if (!rawCutFrontierResolves(input.rawHistoryItems, remembered.frontier)) return fallback("cut-key-unresolved");
+		const retained = applyCutFrontier(grouped, remembered.frontier, history, outgoing);
+		if (!retained) return fallback("frontier-not-in-groups");
+		view = selectionView(retained);
 	}
-
-	return { messages: messagesFor(notice), estimatedTokens: reported(residentTokens + retainedTokens + noticeTokens), budgetTokens, mode: "paged" };
+	const result = run(view, targetTokens, remembered, true);
+	if (result.cutFailure) return fallback(result.cutFailure);
+	if (result.removedCount === 0) return { ...result.selection, cutState: remembered };
+	const boundary = result.lastKeyed;
+	if (!boundary) return fallback("keyless-no-key");
+	if (result.lastWasKeyless) {
+		if (calibrated(boundary.rawEstimate + messageEstimate(boundary.notice, cache)) > budgetTokens) return fallback("keyless-snap-over-budget");
+		const snapshot = boundary.count === 0 ? remembered! : cutSnapshot(boundary.frontier, boundary.notice);
+		return { messages: viewMessages(view, boundary.count, snapshot.notice), estimatedTokens: reported(boundary.rawEstimate + messageEstimate(snapshot.notice, cache)),
+			budgetTokens, mode: "paged", cutState: snapshot };
+	}
+	return { ...result.selection, cutState: cutSnapshot(boundary.frontier, boundary.notice) };
 }

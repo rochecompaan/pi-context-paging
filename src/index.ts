@@ -3,60 +3,24 @@ import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import {
-	DEFAULT_CONTEXT_TOKEN_BUDGET,
 	residentTokenEstimate,
 	selectContext,
 	type ResidentToolDefinition,
 } from "./context-policy.ts";
 import { ContextUsageTracker } from "./context-usage.ts";
+import { ContextCutState } from "./context-cut.ts";
 import { isPagingToolTurn, projectActiveBranch, type HistoryItem } from "./history.ts";
 import { HistoryNavigator } from "./navigator.ts";
 import { registerContextPagingTools, type HistorySnapshot } from "./tools.ts";
 
-export type ContextPagingSettingsSources = {
-	globalSettings: unknown;
-	projectSettings?: unknown;
-	projectTrusted: boolean;
-};
+import {
+	resolveContextPagingSettings,
+	type ContextPagingSettingsSources,
+	type ResolvedContextPagingSettings,
+} from "./settings.ts";
 
-export type ResolvedContextPagingSettings = {
-	enabled: boolean;
-	tokenBudget: number;
-};
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-	return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function readEnabledSetting(settings: unknown): boolean | undefined {
-	if (!isRecord(settings) || !isRecord(settings.contextPaging)) return undefined;
-	return typeof settings.contextPaging.enabled === "boolean"
-		? settings.contextPaging.enabled
-		: undefined;
-}
-
-function readTokenBudgetSetting(settings: unknown): number | undefined {
-	if (!isRecord(settings) || !isRecord(settings.contextPaging)) return undefined;
-	const value = settings.contextPaging.tokenBudget;
-	return typeof value === "number" && Number.isSafeInteger(value) && value > 0
-		? value
-		: undefined;
-}
-
-/** Resolves trusted-project context-paging settings over global settings. */
-export function resolveContextPagingSettings(
-	sources: ContextPagingSettingsSources,
-): ResolvedContextPagingSettings {
-	const projectSettings = sources.projectTrusted ? sources.projectSettings : undefined;
-	return {
-		enabled: readEnabledSetting(projectSettings)
-			?? readEnabledSetting(sources.globalSettings)
-			?? true,
-		tokenBudget: readTokenBudgetSetting(projectSettings)
-			?? readTokenBudgetSetting(sources.globalSettings)
-			?? DEFAULT_CONTEXT_TOKEN_BUDGET,
-	};
-}
+export { resolveContextPagingSettings } from "./settings.ts";
+export type { ContextPagingSettingsSources, ResolvedContextPagingSettings } from "./settings.ts";
 
 async function readJsonSettings(path: string): Promise<unknown> {
 	try {
@@ -106,10 +70,24 @@ export default function contextPagingExtension(
 ): void {
 	let resolvedSettings: ResolvedContextPagingSettings = settingsSources
 		? resolveContextPagingSettings(settingsSources)
-		: { enabled: false, tokenBudget: DEFAULT_CONTEXT_TOKEN_BUDGET };
+		: resolveContextPagingSettings({ globalSettings: { contextPaging: { enabled: false } }, projectTrusted: false });
 	let allItems: HistoryItem[] = [];
 	const navigator = new HistoryNavigator();
 	const usageTracker = new ContextUsageTracker();
+	const cutState = new ContextCutState();
+	const warnedSettingPairs = new Set<string>();
+	const resetPagingState = () => {
+		usageTracker.clear();
+		cutState.reset();
+	};
+	const warnAboutTrimTarget = (ctx: ExtensionContext) => {
+		const { enabled, tokenBudget, trimToTokens, trimToTokensExplicit } = resolvedSettings;
+		if (!enabled || !trimToTokensExplicit || trimToTokens < tokenBudget) return;
+		const pair = `${tokenBudget}:${trimToTokens}`;
+		if (warnedSettingPairs.has(pair)) return;
+		warnedSettingPairs.add(pair);
+		ctx.ui.notify(`Context paging tokenBudget=${tokenBudget}, trimToTokens=${trimToTokens} leaves no headroom. A smaller trimToTokens restores room between cuts.`, "warning");
+	};
 	let visibleHistoryIds: string[] = [];
 	let invalidatingBranchEntries = new Set<string>();
 	let canonicalSessionMessages: AgentMessage[] | undefined;
@@ -118,8 +96,9 @@ export default function contextPagingExtension(
 		const currentInvalidatingEntries = new Set(branch
 			.filter((entry) => entry.type === "context_edit" || entry.type === "compaction")
 			.map((entry) => entry.id));
-		if ([...currentInvalidatingEntries].some((id) => !invalidatingBranchEntries.has(id))) usageTracker.clear();
-		invalidatingBranchEntries = currentInvalidatingEntries;
+		if ([...currentInvalidatingEntries].some((id) => !invalidatingBranchEntries.has(id))) resetPagingState();
+		// Keep saved event IDs even before the branch view exposes their entries.
+		for (const id of currentInvalidatingEntries) invalidatingBranchEntries.add(id);
 		const projected = projectActiveBranch(branch);
 		canonicalSessionMessages = persistentSessionMessages(ctx);
 		allItems = projected;
@@ -157,7 +136,7 @@ export default function contextPagingExtension(
 	});
 
 	pi.on("session_start", async (_event, ctx) => {
-		usageTracker.clear();
+		resetPagingState();
 		invalidatingBranchEntries = new Set();
 		if (!settingsSources) {
 			resolvedSettings = { ...resolvedSettings, enabled: false };
@@ -170,18 +149,22 @@ export default function contextPagingExtension(
 		refreshSafely(ctx);
 	});
 	pi.on("session_tree", (_event, ctx) => {
-		usageTracker.clear();
+		resetPagingState();
 		invalidatingBranchEntries = new Set();
 		refreshSafely(ctx);
 	});
 	pi.on("model_select", () => {
-		usageTracker.clear();
+		resetPagingState();
 	});
-	pi.on("session_compact", () => {
-		usageTracker.clear();
+	pi.on("session_compact", (event) => {
+		const id = event.compactionEntry?.id;
+		if (id && invalidatingBranchEntries.has(id)) return;
+		resetPagingState();
+		if (id) invalidatingBranchEntries.add(id);
 	});
 	pi.on("context", (event, ctx) => {
 		if (!resolvedSettings.enabled) return;
+		warnAboutTrimTarget(ctx);
 
 		let rawHistoryItems: readonly HistoryItem[] | undefined;
 		try {
@@ -199,20 +182,24 @@ export default function contextPagingExtension(
 			const outgoingOnly = canonicalSessionMessages
 				? usageTracker.outgoingOnly(event.messages, canonicalSessionMessages)
 				: undefined;
-			const contextTokens = canonicalSessionMessages
-				? usageTracker.prepare(event.messages, residentTokens, ctx.getContextUsage()?.tokens, canonicalSessionMessages)
-				: undefined;
+			const contextTokens = usageTracker.prepare(
+				event.messages, residentTokens, ctx.getContextUsage()?.tokens, canonicalSessionMessages ?? [],
+			);
 			const selection = selectContext({
 				messages: event.messages,
 				systemPrompt,
 				activeTools,
 				modelContextWindow: ctx.model?.contextWindow,
 				tokenBudget: resolvedSettings.tokenBudget,
+				trimToTokens: resolvedSettings.trimToTokens,
+				cutState: cutState.prepare(rawHistoryItems),
 				contextTokens,
 				outgoingOnly,
 				rawHistoryItems,
 			});
-			if (canonicalSessionMessages) usageTracker.recordSelection(selection.messages, residentTokens, canonicalSessionMessages);
+			// Unknown canonical provenance is an empty trusted subset, never the outgoing request.
+			usageTracker.recordSelection(selection.messages, residentTokens, canonicalSessionMessages ?? []);
+			cutState.commit(selection.cutState);
 			return { messages: selection.messages };
 		} catch (error) {
 			ctx.abort();

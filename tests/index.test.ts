@@ -3,7 +3,13 @@ import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { estimateTokens } from "@earendil-works/pi-coding-agent";
+import {
+	buildSessionProjection, estimateTokens,
+	type SessionBeforeForkEvent, type SessionBeforeSwitchEvent, type SessionBeforeTreeEvent,
+} from "@earendil-works/pi-coding-agent";
+import { ContextCutState } from "../src/context-cut.ts";
+import { ContextUsageTracker } from "../src/context-usage.ts";
+import { fixtureFromEntries, pagingFixture, type PagingFixture } from "./fixtures/context-cut.ts";
 import contextPagingExtension, { resolveContextPagingSettings } from "../src/index.ts";
 import { HistoryNavigator } from "../src/navigator.ts";
 
@@ -61,18 +67,19 @@ function createHarness(settings: Settings | null = { globalSettings: {}, project
 	const handlers = new Map<string, Handler>();
 	const tools: any[] = [];
 	const notifications: Array<{ message: string; level: string }> = [];
-	let branch = branchFor("initial");
+	let branch: any[] = branchFor("initial");
 	let branchReads = 0;
 	let branchError: Error | undefined;
 	let projectedMessages: object[] | undefined;
 	let aborts = 0;
 	let appends = 0;
 	let contextUsage: unknown;
+	let activeTools = ["small", "missing"];
 	const pi = {
 		on(name: string, handler: Handler) { handlers.set(name, handler); },
 		registerTool(tool: any) { tools.push(tool); },
 		appendEntry() { appends++; },
-		getActiveTools: () => ["small", "missing"],
+		getActiveTools: () => activeTools,
 		getAllTools: () => [
 			{ name: "small", description: "small active tool", parameters: { type: "object" } },
 			{ name: "large-inactive", description: "x".repeat(300_000), parameters: { type: "object" } },
@@ -87,7 +94,8 @@ function createHarness(settings: Settings | null = { globalSettings: {}, project
 			},
 			buildSessionProjection: () => ({
 				messages: projectedMessages ?? branch.flatMap((item: any) =>
-					item.type === "message" ? [item.message] : []),
+					item.type === "custom_message" ? buildSessionProjection([item]).messages
+						: item.type === "message" ? [item.message] : []),
 			}),
 		},
 		getSystemPrompt: () => "system",
@@ -104,7 +112,7 @@ function createHarness(settings: Settings | null = { globalSettings: {}, project
 		ctx,
 		notifications,
 		branch: () => branch,
-		setBranch: (next: typeof branch) => { branch = next; branchError = undefined; },
+		setBranch: (next: any[]) => { branch = next; branchError = undefined; },
 		setBranchError: (error: Error) => { branchError = error; },
 		setProjectedMessages: (next: object[] | undefined) => { projectedMessages = next; },
 		branchReads: () => branchReads,
@@ -112,6 +120,7 @@ function createHarness(settings: Settings | null = { globalSettings: {}, project
 		abortCalls: () => aborts,
 		appendCalls: () => appends,
 		setContextUsage: (next: unknown) => { contextUsage = next; },
+		setActiveTools: (next: string[]) => { activeTools = next; },
 	};
 }
 
@@ -195,6 +204,26 @@ test("falls through invalid token budgets without throwing", () => {
 		projectSettings: { contextPaging: { tokenBudget: "invalid" } },
 		projectTrusted: true,
 	}).tokenBudget, 96_000);
+});
+
+test("uses the resolved lower trim target when stable cuts are committed", async () => {
+	const harness = createHarness({
+		globalSettings: { contextPaging: { tokenBudget: 128_000, trimToTokens: 80_000 } }, projectTrusted: false,
+	});
+	harness.ctx.model.contextWindow = 128_000;
+	const completed = ["LEGACY_A", "LEGACY_B", "LEGACY_C"].flatMap((label) => [
+		user(`${label}_REQUEST ${"x".repeat(120_000)}`),
+		assistant(`${label}_ANSWER ${"x".repeat(120_000)}`),
+	]);
+	const messages = [...completed, user("ACTIVE_REQUEST")];
+	harness.setBranch(messages.map((message, index) => entry(`legacy-${index}`, message)));
+	const selection = await emit(harness, "context", { type: "context", messages }) as { messages: object[] };
+
+	assert.equal(hasMarker(selection.messages, "LEGACY_A"), false);
+	assert.equal(hasMarker(selection.messages, "LEGACY_B"), false);
+	assert.equal(hasMarker(selection.messages, "LEGACY_C"), true);
+	assert.equal(hasMarker(selection.messages, "ACTIVE_REQUEST"), true);
+	assert.equal(harness.abortCalls(), 0);
 });
 
 test("registers only paging lifecycle handlers", () => {
@@ -305,9 +334,10 @@ test("selects canonical context and isolates raw-history failures", async () => 
 	assert.match(harness.notifications.at(-1)?.message ?? "", /aborted this provider call/i);
 });
 
-test("uses a tracked measured anchor when raw history returns after paging", async () => {
+test("uses a tracked measured anchor when raw history returns after paging", async (t) => {
+	const prepares = t.mock.method(ContextUsageTracker.prototype, "prepare");
 	const harness = createHarness({
-		globalSettings: { contextPaging: { enabled: true, tokenBudget: 64_000 } },
+		globalSettings: { contextPaging: { enabled: true, tokenBudget: 64_000, trimToTokens: 64_000 } },
 		projectTrusted: false,
 	});
 	const old = user(`OLD_RAW_HISTORY ${"x".repeat(300_000)}`);
@@ -322,6 +352,7 @@ test("uses a tracked measured anchor when raw history returns after paging", asy
 	harness.setContextUsage({ tokens: statusTokens(50_000, [next]), contextWindow: 64_000, percent: 78 });
 	const second = await emit(harness, "context", { messages: [old, active, response, next] }) as any;
 
+	assert.equal(typeof prepares.mock.calls.at(-1)?.result, "number", "the real tracker supplies measured accounting");
 	assert.equal(hasMarker(second.messages, "OLD_RAW_HISTORY"), false);
 	assert.equal(hasMarker(second.messages, "ACTIVE_REQUEST"), true);
 	assert.equal(hasMarker(second.messages, "NEXT_REQUEST"), true);
@@ -695,4 +726,398 @@ test("cancels only automatic compaction and leaves disabled paging inert", async
 	}
 	const messages = [user("unchanged")];
 	assert.equal(await emit(disabled, "context", { messages }), undefined);
+});
+
+// Frontier lifecycle: real selector/tracker, canonical custom projection, no provider calls.
+function integrationFixture(kind: "completed" | "active" | "custom-active"): PagingFixture {
+	const fixture = pagingFixture(kind);
+	return fixtureFromEntries(fixture.entries.map((item) => {
+		if (item.type !== "message") return item;
+		if (kind === "completed" && item.id.startsWith("turn-old-")) {
+			return { ...item, message: { ...item.message, content: [{ type: "text", text: `${item.id} payload ${"x".repeat(160_000)}` }] } } as typeof item;
+		}
+		if (kind !== "completed" && item.message.role === "toolResult") {
+			return { ...item, message: { ...item.message, content: [{ type: "text", text: `${item.id} payload ${"x".repeat(140_000)}` }] } };
+		}
+		return item;
+	}));
+}
+
+function fixtureHarness(fixture: PagingFixture) {
+	const harness = createHarness({ globalSettings: { contextPaging: { tokenBudget: 128_000 } }, projectTrusted: false });
+	harness.ctx.model.contextWindow = 128_000;
+	harness.setBranch(fixture.entries);
+	return harness;
+}
+
+function resetFixture() {
+	const harness = createHarness({ globalSettings: { contextPaging: { tokenBudget: 1_000 } }, projectTrusted: false });
+	const messages = ["RESET_A", "RESET_B", "RESET_C"].flatMap((id) => [user(`${id} request`), assistant(`${id} ${"x".repeat(960)}`)]);
+	messages.push(user("RESET_ACTIVE"));
+	harness.setBranch(messages.map((message, index) => entry(`reset-${index}`, message)));
+	harness.ctx.getSystemPrompt = () => "s".repeat(2_000);
+	return { harness, messages };
+}
+
+function projectedInvalidation(harness: ReturnType<typeof createHarness>, type: "context_edit" | "compaction", id: string) {
+	const branch = harness.branch();
+	const metadata = { id, parentId: branch.at(-1)!.id, timestamp: "2026-09-21T00:00:00.000Z" };
+	const saved = type === "compaction"
+		? { ...metadata, type, summary: "PROJECTED_COMPACTION", firstKeptEntryId: "reset-0", tokensBefore: 1_300 }
+		: { ...metadata, type, targetId: "reset-6", replacement: { content: "RESET_ACTIVE edited" } };
+	const fixture = fixtureFromEntries([...branch, saved]);
+	return { entry: fixture.entries.at(-1)!, entries: fixture.entries, messages: [...fixture.input.messages] };
+}
+
+for (const kind of ["active", "custom-active"] as const) {
+	test(`${kind} commits its partial cut across clones and turn completion`, async (t) => {
+		const commits = t.mock.method(ContextCutState.prototype, "commit");
+		const prepares = t.mock.method(ContextUsageTracker.prototype, "prepare");
+		const fixture = integrationFixture(kind);
+		const harness = fixtureHarness(fixture);
+		const original = fixture.input.messages;
+		const first = await emit(harness, "context", { messages: original }) as any;
+		const firstSnapshot = commits.mock.calls.at(-1)?.arguments[0];
+		assert.equal(firstSnapshot?.frontier.kind, "partialTurn");
+		assert.equal(firstSnapshot?.frontier.lastEvicted.historyId, "turn-live-2");
+		assert.equal(prepares.mock.calls.at(-1)?.arguments[0], original);
+		assert.equal(hasMarker(first.messages, "result-live-2 payload"), false);
+		assert.equal(hasMarker(first.messages, "result-live-3 payload"), true);
+
+		const cloned = structuredClone(original);
+		const second = await emit(harness, "context", { messages: cloned }) as any;
+		assert.ok(commits.mock.calls.at(-1)?.arguments[0], "the cloned call commits a real snapshot");
+		assert.equal(prepares.mock.calls.at(-1)?.arguments[0], cloned);
+		assert.deepEqual(second.messages, first.messages);
+		if (kind === "custom-active") assert.equal(second.messages[1].role, "custom");
+
+		const next = user("NEXT_AFTER_PARTIAL_COMPLETION");
+		harness.setBranch([...fixture.entries, entry("next-partial-user", next)]);
+		const lastAssistant = [...original].reverse().find((message) => message.role === "assistant");
+		await emit(harness, "turn_end", { message: lastAssistant });
+		const third = await emit(harness, "context", { messages: structuredClone([...original, next]) }) as any;
+		assert.deepEqual(third.messages.slice(0, first.messages.length), first.messages);
+		assert.deepEqual(commits.mock.calls.at(-1)?.arguments[0], firstSnapshot);
+		assert.equal(hasMarker(third.messages, "result-live-2 payload"), false);
+		assert.equal(hasMarker(third.messages, "NEXT_AFTER_PARTIAL_COMPLETION"), true);
+		assert.equal(harness.appendCalls(), 0);
+		assert.equal(harness.abortCalls(), 0);
+	});
+}
+
+// A canceled attempt emits its before event but never the matching success event.
+const canceledAttempts: Array<SessionBeforeTreeEvent | SessionBeforeForkEvent | SessionBeforeSwitchEvent> = [
+	{
+		type: "session_before_tree",
+		preparation: {
+			targetId: "reset-2", oldLeafId: "reset-6", commonAncestorId: "reset-2",
+			entriesToSummarize: [], userWantsSummary: false,
+		},
+		signal: new AbortController().signal,
+	},
+	{ type: "session_before_fork", entryId: "reset-2", position: "at" },
+	{ type: "session_before_switch", reason: "resume", targetSessionFile: "/tmp/paging-canceled-session.jsonl" },
+];
+for (const event of canceledAttempts) {
+	test(`canceled ${event.type} preserves the committed cut and frozen notice`, async (t) => {
+		const commits = t.mock.method(ContextCutState.prototype, "commit");
+		const { harness, messages } = resetFixture();
+		const first = await emit(harness, "context", { messages }) as any;
+		const snapshot = structuredClone(commits.mock.calls.at(-1)?.arguments[0]);
+		assert.ok(snapshot);
+		assert.equal(hasMarker(first.messages, "RESET_A request"), false);
+		const notice = structuredClone(first.messages[0]);
+		assert.equal(notice.role, "user");
+		assert.match(marker(notice), /Context paging notice/);
+
+		// This request would restore RESET_A if the before hook wrongly reset the cut.
+		harness.ctx.getSystemPrompt = () => "system";
+		assert.equal(await emit(harness, event.type, event), undefined);
+		const next = await emit(harness, "context", { messages: structuredClone(messages) }) as any;
+		assert.deepEqual(next.messages, first.messages);
+		assert.deepEqual(next.messages[0], notice);
+		assert.deepEqual(commits.mock.calls.at(-1)?.arguments[0], snapshot);
+		assert.equal(hasMarker(next.messages, "RESET_A request"), false);
+		assert.equal(harness.abortCalls(), 0);
+	});
+}
+
+for (const [name, event] of [
+	["session_start", { reason: "new" }],
+	["session_start", { reason: "resume" }],
+	["session_start", { reason: "fork" }],
+	["session_tree", {}],
+	["session_compact", {}],
+] as const) {
+	test(`successful ${name} ${"reason" in event ? event.reason : ""} resets the frontier`, async (t) => {
+		const commits = t.mock.method(ContextCutState.prototype, "commit");
+		const { harness, messages } = resetFixture();
+		const first = await emit(harness, "context", { messages }) as any;
+		assert.ok(commits.mock.calls.at(-1)?.arguments[0]);
+		assert.equal(hasMarker(first.messages, "RESET_A request"), false);
+		harness.ctx.getSystemPrompt = () => "system";
+		await emit(harness, name, event);
+		const next = await emit(harness, "context", { messages: structuredClone(messages) }) as any;
+		assert.equal(hasMarker(next.messages, "RESET_A request"), true);
+		assert.equal(hasMarker(next.messages, "Context paging notice"), false);
+		assert.equal(harness.abortCalls(), 0);
+	});
+}
+
+test("model switches reset the frontier in both window-size directions", async (t) => {
+	const commits = t.mock.method(ContextCutState.prototype, "commit");
+	const harness = createHarness({ globalSettings: { contextPaging: { tokenBudget: 128_000 } }, projectTrusted: false });
+	const messages = ["WINDOW_A", "WINDOW_B", "WINDOW_C"].flatMap((id) => [user(id), assistant(`${id} ${"x".repeat(240_000)}`)]);
+	messages.push(user("WINDOW_ACTIVE"));
+	harness.setBranch(messages.map((message, index) => entry(`window-${index}`, message)));
+	const small = await emit(harness, "context", { messages }) as any;
+	assert.ok(commits.mock.calls.at(-1)?.arguments[0]);
+	assert.equal(hasMarker(small.messages, "WINDOW_C"), false);
+	harness.ctx.model.contextWindow = 128_000;
+	await emit(harness, "model_select", { model: harness.ctx.model });
+	const large = await emit(harness, "context", { messages: structuredClone(messages) }) as any;
+	assert.equal(hasMarker(large.messages, "WINDOW_C"), true);
+	harness.ctx.model.contextWindow = 64_000;
+	await emit(harness, "model_select", { model: harness.ctx.model });
+	const smallAgain = await emit(harness, "context", { messages: structuredClone(messages) }) as any;
+	assert.equal(hasMarker(smallAgain.messages, "WINDOW_C"), false);
+	assert.equal(hasMarker(smallAgain.messages, "WINDOW_ACTIVE"), true);
+	assert.equal(harness.abortCalls(), 0);
+});
+
+test("a fresh extension has no prior frontier", async (t) => {
+	const commits = t.mock.method(ContextCutState.prototype, "commit");
+	const old = resetFixture();
+	const selected = await emit(old.harness, "context", { messages: old.messages }) as any;
+	assert.ok(commits.mock.calls.at(-1)?.arguments[0]);
+	assert.equal(hasMarker(selected.messages, "RESET_A request"), false);
+	const fresh = resetFixture();
+	fresh.harness.ctx.getSystemPrompt = () => "system";
+	const restarted = await emit(fresh.harness, "context", { messages: fresh.messages }) as any;
+	assert.equal(hasMarker(restarted.messages, "RESET_A request"), true);
+	assert.equal(hasMarker(restarted.messages, "Context paging notice"), false);
+});
+
+for (const type of ["context_edit", "compaction"] as const) {
+	test(`a new projected ${type} invalidates once and freezes the rebuilt notice`, async (t) => {
+		const resets = t.mock.method(ContextCutState.prototype, "reset");
+		const commits = t.mock.method(ContextCutState.prototype, "commit");
+		const { harness, messages } = resetFixture();
+		await emit(harness, "context", { messages });
+		assert.ok(commits.mock.calls.at(-1)?.arguments[0]);
+		const invalidation = projectedInvalidation(harness, type, `new-${type}`);
+		harness.setBranch(invalidation.entries);
+		const projected = invalidation.messages;
+		harness.setProjectedMessages(projected);
+		const resetCount = resets.mock.calls.length;
+		const first = await emit(harness, "context", { messages: projected }) as any;
+		assert.equal(resets.mock.calls.length, resetCount + 1);
+		assert.ok(commits.mock.calls.at(-1)?.arguments[0]);
+		if (type === "context_edit") assert.equal(hasMarker(first.messages, "RESET_ACTIVE edited"), true);
+		const second = await emit(harness, "context", { messages: structuredClone(projected) }) as any;
+		assert.equal(resets.mock.calls.length, resetCount + 1);
+		assert.deepEqual(second.messages, first.messages);
+		assert.equal(harness.abortCalls(), 0);
+	});
+}
+
+for (const order of ["event-first", "entry-first"] as const) {
+	test(`${order} compaction signals cannot clear the rebuilt frontier twice`, async (t) => {
+		const resets = t.mock.method(ContextCutState.prototype, "reset");
+		const commits = t.mock.method(ContextCutState.prototype, "commit");
+		const { harness, messages } = resetFixture();
+		await emit(harness, "context", { messages });
+		const compaction = projectedInvalidation(harness, "compaction", "compact-once");
+		const compactionEntry = compaction.entry;
+		const projected = compaction.messages;
+		harness.setProjectedMessages(projected);
+		if (order === "event-first") await emit(harness, "session_compact", { compactionEntry });
+		else harness.setBranch(compaction.entries);
+		const first = await emit(harness, "context", { messages: projected }) as any;
+		assert.ok(commits.mock.calls.at(-1)?.arguments[0]);
+		const afterFirst = resets.mock.calls.length;
+		harness.ctx.getSystemPrompt = () => "system";
+		if (order === "event-first") harness.setBranch(compaction.entries);
+		else await emit(harness, "session_compact", { compactionEntry });
+		const second = await emit(harness, "context", { messages: structuredClone(projected) }) as any;
+		assert.equal(resets.mock.calls.length, afterFirst);
+		assert.deepEqual(second.messages, first.messages);
+		assert.equal(hasMarker(second.messages, "RESET_A request"), false);
+		harness.ctx.getSystemPrompt = () => "s".repeat(2_000);
+		const newer = projectedInvalidation(harness, "compaction", "compact-twice");
+		harness.setBranch(newer.entries);
+		harness.setProjectedMessages(newer.messages);
+		await emit(harness, "session_compact", { compactionEntry: newer.entry });
+		assert.equal(resets.mock.calls.length, afterFirst + 1);
+		const afterNewer = await emit(harness, "context", { messages: newer.messages }) as any;
+		assert.ok(commits.mock.calls.at(-1)?.arguments[0]);
+		assert.equal(resets.mock.calls.length, afterFirst + 1);
+		assert.equal(hasMarker(afterNewer.messages, "RESET_A request"), false);
+		assert.equal(harness.abortCalls(), 0);
+	});
+}
+
+test("canceled compaction accounting fallback does not reset the cut", async (t) => {
+	const prepares = t.mock.method(ContextUsageTracker.prototype, "prepare");
+	const { harness, messages } = resetFixture();
+	const first = await emit(harness, "context", { messages }) as any;
+	const response = assistant("RESET_MEASURED_RESPONSE", { totalTokens: 50 });
+	const next = user("RESET_NEXT");
+	harness.setBranch([...harness.branch(), entry("reset-response", response), entry("reset-next", next)]);
+	await emit(harness, "turn_end", { message: response });
+	harness.setContextUsage({ tokens: statusTokens(50, [next]) });
+	harness.ctx.getSystemPrompt = () => "system";
+	const incoming = [...messages, response, next];
+	const anchored = await emit(harness, "context", { messages: incoming }) as any;
+	assert.equal(typeof prepares.mock.calls.at(-1)?.result, "number");
+	assert.deepEqual(anchored.messages.slice(0, first.messages.length), first.messages);
+	assert.deepEqual(await emit(harness, "session_before_compact", { reason: "threshold" }), { cancel: true });
+	const canceled = await emit(harness, "context", { messages: structuredClone(incoming) }) as any;
+	assert.deepEqual(canceled.messages, anchored.messages);
+	await emit(harness, "session_before_compact", { reason: "manual" });
+	const fallback = await emit(harness, "context", { messages: structuredClone(incoming) }) as any;
+	assert.equal(prepares.mock.calls.at(-1)?.result, undefined);
+	assert.deepEqual(fallback.messages, anchored.messages);
+	assert.equal(hasMarker(fallback.messages, "RESET_A request"), false);
+	assert.equal(harness.abortCalls(), 0);
+});
+
+test("a failed selection never commits a candidate frontier", async (t) => {
+	const commits = t.mock.method(ContextCutState.prototype, "commit");
+	const fixture = integrationFixture("active");
+	const harness = fixtureHarness(fixture);
+	const first = await emit(harness, "context", { messages: fixture.input.messages }) as any;
+	assert.ok(commits.mock.calls.at(-1)?.arguments[0]);
+	const before = commits.mock.calls.length;
+	const malformed = [result("missing-call", "INVALID_ORIGINAL_EXCHANGE"), ...fixture.input.messages];
+	const failed = await emit(harness, "context", { messages: malformed }) as any;
+	assert.equal(failed.messages, malformed);
+	assert.equal(commits.mock.calls.length, before);
+	assert.equal(harness.abortCalls(), 1);
+	const retry = await emit(harness, "context", { messages: structuredClone(fixture.input.messages) }) as any;
+	assert.deepEqual(retry.messages, first.messages);
+	assert.equal(harness.appendCalls(), 0);
+});
+
+test("warns once for an inherited high target across calls and model switches", async (t) => {
+	const commits = t.mock.method(ContextCutState.prototype, "commit");
+	const settings = {
+		globalSettings: { contextPaging: { tokenBudget: 128_000, trimToTokens: 80_000 } },
+		projectSettings: { contextPaging: { tokenBudget: 64_000 } }, projectTrusted: true,
+	};
+	const fixture = integrationFixture("completed");
+	const harness = createHarness(settings);
+	harness.setBranch(fixture.entries);
+	const first = await emit(harness, "context", { messages: fixture.input.messages }) as any;
+	assert.ok(commits.mock.calls.at(-1)?.arguments[0]);
+	const second = await emit(harness, "context", { messages: structuredClone(fixture.input.messages) }) as any;
+	assert.deepEqual(second.messages, first.messages);
+	harness.ctx.model.contextWindow = 128_000;
+	await emit(harness, "model_select", { model: harness.ctx.model });
+	await emit(harness, "context", { messages: fixture.input.messages });
+	const warnings = harness.notifications.filter(({ message }) => /tokenBudget.*trimToTokens|trimToTokens.*tokenBudget/.test(message));
+	assert.equal(warnings.length, 1);
+	assert.match(warnings[0]!.message, /64[,_]?000/);
+	assert.match(warnings[0]!.message, /80[,_]?000/);
+	assert.match(warnings[0]!.message, /headroom|room between cuts/);
+	const fresh = createHarness(settings);
+	await emit(fresh, "context", { messages: [user("NEW_INSTANCE")] });
+	assert.equal(fresh.notifications.filter(({ message }) => /trimToTokens/.test(message)).length, 1);
+	assert.equal(harness.abortCalls(), 0);
+});
+
+test("deduplicates warnings when settings reload A, B, then A", async () => {
+	const previousHome = process.env.HOME;
+	const home = await mkdtemp(join(tmpdir(), "context-paging-warning-settings-"));
+	try {
+		process.env.HOME = home;
+		const agentDirectory = join(home, ".pi", "agent");
+		await mkdir(agentDirectory, { recursive: true });
+		const harness = createHarness(null);
+		for (const [tokenBudget, trimToTokens, expected] of [[64_000, 80_000, 1], [48_000, 60_000, 2], [64_000, 80_000, 2]]) {
+			await writeFile(join(agentDirectory, "settings.json"), JSON.stringify({ contextPaging: { tokenBudget, trimToTokens } }));
+			await emit(harness, "session_start", { reason: "reload" });
+			await emit(harness, "context", { messages: [user("RELOADED_REQUEST")] });
+			assert.equal(harness.notifications.filter(({ message }) => /trimToTokens/.test(message)).length, expected);
+		}
+	} finally {
+		if (previousHome === undefined) delete process.env.HOME;
+		else process.env.HOME = previousHome;
+		await rm(home, { recursive: true, force: true });
+	}
+});
+
+test("implicit budget-one targets do not warn and disabled high targets remain inert", async () => {
+	const implicit = createHarness({ globalSettings: { contextPaging: { tokenBudget: 1 } }, projectTrusted: false });
+	implicit.ctx.getSystemPrompt = () => "";
+	implicit.setActiveTools([]);
+	implicit.setBranch([]);
+	await emit(implicit, "context", { messages: [] });
+	assert.equal(implicit.notifications.length, 0);
+	assert.equal(implicit.abortCalls(), 0);
+	const disabled = createHarness({ globalSettings: { contextPaging: { enabled: false, tokenBudget: 64_000, trimToTokens: 80_000 } }, projectTrusted: false });
+	await emit(disabled, "session_start", { reason: "new" });
+	assert.equal(await emit(disabled, "context", { messages: [user("UNCHANGED_DISABLED")] }), undefined);
+	assert.equal(disabled.notifications.length, 0);
+	assert.equal(disabled.abortCalls(), 0);
+});
+
+test("records the raw-provenance fallback output and re-establishes accounting safely", async (t) => {
+	const records = t.mock.method(ContextUsageTracker.prototype, "recordSelection");
+	const prepares = t.mock.method(ContextUsageTracker.prototype, "prepare");
+	const commits = t.mock.method(ContextCutState.prototype, "commit");
+	const fixture = integrationFixture("completed");
+	const harness = fixtureHarness(fixture);
+	const first = await emit(harness, "context", { messages: fixture.input.messages }) as any;
+	assert.equal(hasMarker(first.messages, "turn-old-B payload"), false);
+	assert.ok(commits.mock.calls.at(-1)?.arguments[0]);
+	harness.setBranchError(new Error("UNAVAILABLE_RAW_PROVENANCE"));
+	const before = records.mock.calls.length;
+	const fallback = await emit(harness, "context", { messages: fixture.input.messages }) as any;
+	assert.equal(hasMarker(fallback.messages, "turn-old-B payload"), true, "fallback cuts toward budget, not target");
+	assert.equal(records.mock.calls.length, before + 1);
+	assert.equal(records.mock.calls.at(-1)?.arguments[0], fallback.messages);
+	assert.deepEqual(records.mock.calls.at(-1)?.arguments[2], [], "unavailable canonical provenance is never invented");
+	assert.equal(commits.mock.calls.at(-1)?.arguments[0], undefined);
+
+	const response = assistant("FALLBACK_RESPONSE", { totalTokens: 50 });
+	await emit(harness, "turn_end", { message: response });
+	const next = user("AFTER_RAW_RECOVERY");
+	harness.setBranch([...fixture.entries, entry("fallback-response", response), entry("after-fallback", next)]);
+	harness.setContextUsage({ tokens: statusTokens(50, [next]) });
+	const recovered = await emit(harness, "context", { messages: [...fixture.input.messages, response, next] }) as any;
+	assert.equal(prepares.mock.calls.at(-1)?.result, undefined, "the failed projection cannot leave a mismatched measured anchor");
+	assert.equal(hasMarker(recovered.messages, "turn-old-B payload"), false);
+	assert.ok(commits.mock.calls.at(-1)?.arguments[0]);
+
+	const measuredResponse = assistant("MEASURED_RECOVERED_RESPONSE", { totalTokens: 50 });
+	const measuredNext = user("MEASURED_NEXT");
+	harness.setBranch([...harness.branch(), entry("measured-response", measuredResponse), entry("measured-next", measuredNext)]);
+	await emit(harness, "turn_end", { message: measuredResponse });
+	harness.setContextUsage({ tokens: statusTokens(50, [measuredNext]) });
+	await emit(harness, "context", { messages: [...fixture.input.messages, response, next, measuredResponse, measuredNext] });
+	assert.equal(typeof prepares.mock.calls.at(-1)?.result, "number");
+	assert.equal(harness.abortCalls(), 0);
+});
+
+test("a filtered remembered exchange clears fallback state and can rebuild the same key", async (t) => {
+	const records = t.mock.method(ContextUsageTracker.prototype, "recordSelection");
+	const commits = t.mock.method(ContextCutState.prototype, "commit");
+	const preparations = t.mock.method(ContextCutState.prototype, "prepare");
+	const fixture = integrationFixture("active");
+	const harness = fixtureHarness(fixture);
+	await emit(harness, "context", { messages: fixture.input.messages });
+	const first = commits.mock.calls.at(-1)?.arguments[0];
+	assert.ok(first);
+	const filtered = fixture.input.messages.filter((message: any) => message.toolCallId !== "call-live-2"
+		&& !message.content?.some?.((block: any) => block.type === "toolCall" && block.id === "call-live-2"));
+	const fallback = await emit(harness, "context", { messages: filtered }) as any;
+	assert.equal(hasMarker(fallback.messages, "result-live-1 payload"), true);
+	assert.equal(records.mock.calls.at(-1)?.arguments[0], fallback.messages);
+	assert.equal(commits.mock.calls.at(-1)?.arguments[0], undefined);
+	const rebuilt = await emit(harness, "context", { messages: structuredClone(fixture.input.messages) }) as any;
+	assert.equal(preparations.mock.calls.at(-1)?.result, undefined);
+	assert.deepEqual(commits.mock.calls.at(-1)?.arguments[0]?.frontier, first.frontier);
+	assert.equal(hasMarker(rebuilt.messages, "result-live-1 payload"), false);
+	assert.equal(harness.abortCalls(), 0);
 });

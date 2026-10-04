@@ -5,14 +5,50 @@ import type { HistoryItem } from "../src/history.ts";
 import {
 	DEFAULT_CONTEXT_TOKEN_BUDGET,
 	ContextSelectionError,
+	contextTokenLimits,
 	selectContext,
 } from "../src/context-policy.ts";
 
 const LEGACY_TEST_TOKEN_BUDGET = 64_000;
 
+test("computes effective targets without rounding integer products", () => {
+	const cases = [
+		{ budget: 128_000, target: 80_000, window: undefined, wantBudget: 128_000, wantTarget: 80_000, modelLimit: Infinity },
+		{ budget: 128_000, target: 80_000, window: 64_000, wantBudget: 64_000, wantTarget: 40_000, modelLimit: 64_000 },
+		{ budget: 128_000, target: 160_000, window: 64_000, wantBudget: 64_000, wantTarget: 64_000, modelLimit: 64_000 },
+		{ budget: Number.MAX_SAFE_INTEGER, target: Number.MAX_SAFE_INTEGER - 1, window: 64_000, wantBudget: 64_000, wantTarget: 63_999, modelLimit: 64_000 },
+		{ budget: 128_000, target: 80_000, window: 16_000.5, wantBudget: 16_000.5, wantTarget: 10_000, modelLimit: 16_000.5 },
+		{ budget: 128_000, target: 80_000, window: 0.5, wantBudget: 0.5, wantTarget: 1, modelLimit: 0.5 },
+	];
+	for (const value of cases) {
+		assert.deepEqual(contextTokenLimits({
+			tokenBudget: value.budget, trimToTokens: value.target, modelContextWindow: value.window,
+		}), { budgetTokens: value.wantBudget, trimToTokens: value.wantTarget, modelLimit: value.modelLimit });
+	}
+});
+
+test("treats an omitted direct target as an adaptive target, not an invalid value", () => {
+	assert.deepEqual(contextTokenLimits({ tokenBudget: 128_000, modelContextWindow: undefined }), {
+		budgetTokens: 128_000, trimToTokens: 80_000, modelLimit: Infinity,
+	});
+	assert.deepEqual(contextTokenLimits({ tokenBudget: 1, modelContextWindow: undefined }), {
+		budgetTokens: 1, trimToTokens: 1, modelLimit: Infinity,
+	});
+});
+
+test("rejects invalid explicit direct targets instead of silently ignoring them", () => {
+	for (const trimToTokens of [0, -1, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1, "80000", true, null, [], {}]) {
+		assert.throws(() => selectContext({
+			messages: [], systemPrompt: "", activeTools: [], modelContextWindow: 1_000_000,
+			tokenBudget: 128_000, trimToTokens: trimToTokens as any,
+		}), (error: unknown) => error instanceof ContextSelectionError && error.code === "INVALID_TRIM_TARGET");
+	}
+});
+
 type SelectionOverrides = {
 	modelContextWindow?: number;
 	tokenBudget?: number;
+	trimToTokens?: number;
 	rawHistoryItems?: HistoryItem[];
 	contextTokens?: number;
 	outgoingOnly?: readonly boolean[];
@@ -52,6 +88,7 @@ const selected = (
 	{
 		modelContextWindow = 100_000,
 		tokenBudget = LEGACY_TEST_TOKEN_BUDGET,
+		trimToTokens = tokenBudget,
 		rawHistoryItems,
 		contextTokens,
 		outgoingOnly,
@@ -62,6 +99,8 @@ const selected = (
 	activeTools: [{ name: "read", description: "Read files", parameters: { type: "object" } }],
 	modelContextWindow,
 	tokenBudget,
+	// These characterize legacy budget-only safety/recovery unless a test supplies an explicit target.
+	trimToTokens,
 	rawHistoryItems,
 	contextTokens,
 	outgoingOnly,
