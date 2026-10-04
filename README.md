@@ -13,13 +13,13 @@ It does not summarize or modify the stored session transcript.
 From npm:
 
 ```sh
-pi install npm:@rochecompaan/pi-context-paging@0.1.0
+pi install npm:@rochecompaan/pi-context-paging@0.2.0
 ```
 
 From the GitHub release tag:
 
 ```sh
-pi install git:github.com/rochecompaan/pi-context-paging@v0.1.0
+pi install git:github.com/rochecompaan/pi-context-paging@v0.2.0
 ```
 
 Restart Pi after installation.
@@ -108,14 +108,23 @@ Manual compaction remains available.
 
 Read [the architecture document](docs/architecture.md) for module and lifecycle details.
 
-## Changes in 0.1.1
+## Changes in 0.2.0
+
+- Keyed cuts and paging notices stay unchanged between budget crossings. Lower estimates do not restore excluded history.
+- `trimToTokens` defaults to 5/8 of the budget. Token settings accept positive safe integers and scale for smaller model windows.
+- Custom-started turns and partly evicted turns keep valid boundaries after completion.
+- Keyless boundaries snap backward only within the budget. Missing or ambiguous anchors use stateless budget-only selection.
+- Successful lifecycle changes reset the cut. Canceled navigation preserves it.
+- Outgoing-only instructions no longer hide an earlier valid turn anchor.
+- Error wording distinguishes resident input from the retained request and paging notice.
+
+### Earlier fixes included in this release
 
 - Provider-backed accounting handles restored raw history and outgoing-only instructions without counting resident input twice.
 - Raw history retains interrupted turns and actual results. Provider requests omit those exchanges after validating their results.
 - Normal incomplete exchanges and malformed results retain strict validation.
 
-The installation examples still target the published `0.1.0` release. Publication of the `0.1.1` candidate requires separate approval.
-The stable-cut settings and behavior described here are candidate changes, not a newly published release.
+Further accounting changes and model-guided eviction are not part of this release.
 
 ## Development
 
@@ -150,7 +159,7 @@ pi update --extensions
 Remove the package:
 
 ```sh
-pi remove npm:@rochecompaan/pi-context-paging@0.1.0
+pi remove npm:@rochecompaan/pi-context-paging@0.2.0
 ```
 
 ## License
