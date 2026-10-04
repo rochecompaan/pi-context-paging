@@ -73,13 +73,13 @@ The model decides when to search.
 From npm:
 
 ```sh
-pi install npm:@rochecompaan/pi-context-paging@0.2.0
+pi install npm:@rochecompaan/pi-context-paging@0.2.1
 ```
 
 From the GitHub release tag:
 
 ```sh
-pi install git:github.com/rochecompaan/pi-context-paging@v0.2.0
+pi install git:github.com/rochecompaan/pi-context-paging@v0.2.1
 ```
 
 After installation, restart Pi.
@@ -210,6 +210,11 @@ A successful manual compaction resets the cut point.
 
 Read [the architecture document](docs/architecture.md) for module and lifecycle details.
 
+## Changes in 0.2.1
+
+- The README now explains context paging in simple English. It describes why compaction and handoff lose recent detail, and how a bounded window keeps the model out of the dumb zone.
+- The runtime source is unchanged from 0.2.0.
+
 ## Changes in 0.2.0
 
 - The cut point and the paging notice stay the same between budget crossings. A lower estimate does not bring removed history back.
@@ -262,7 +267,7 @@ pi update --extensions
 Remove the package:
 
 ```sh
-pi remove npm:@rochecompaan/pi-context-paging@0.2.0
+pi remove npm:@rochecompaan/pi-context-paging@0.2.1
 ```
 
 ## License
