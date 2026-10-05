@@ -71,6 +71,8 @@ export default function contextPagingExtension(
 	let resolvedSettings: ResolvedContextPagingSettings = settingsSources
 		? resolveContextPagingSettings(settingsSources)
 		: resolveContextPagingSettings({ globalSettings: { contextPaging: { enabled: false } }, projectTrusted: false });
+	let sessionEnabled: boolean | undefined;
+	const isEnabled = () => sessionEnabled ?? resolvedSettings.enabled;
 	let allItems: HistoryItem[] = [];
 	const navigator = new HistoryNavigator();
 	const usageTracker = new ContextUsageTracker();
@@ -81,8 +83,8 @@ export default function contextPagingExtension(
 		cutState.reset();
 	};
 	const warnAboutTrimTarget = (ctx: ExtensionContext) => {
-		const { enabled, tokenBudget, trimToTokens, trimToTokensExplicit } = resolvedSettings;
-		if (!enabled || !trimToTokensExplicit || trimToTokens < tokenBudget) return;
+		const { tokenBudget, trimToTokens, trimToTokensExplicit } = resolvedSettings;
+		if (!isEnabled() || !trimToTokensExplicit || trimToTokens < tokenBudget) return;
 		const pair = `${tokenBudget}:${trimToTokens}`;
 		if (warnedSettingPairs.has(pair)) return;
 		warnedSettingPairs.add(pair);
@@ -130,12 +132,29 @@ export default function contextPagingExtension(
 		}
 	};
 
+	pi.registerCommand("context-paging", {
+		description: "Enable or disable context paging for this session, or show status",
+		handler: async (args, ctx) => {
+			const action = args.trim();
+			if (action === "on" || action === "off") {
+				const enabled = action === "on";
+				if (enabled !== isEnabled()) resetPagingState();
+				sessionEnabled = enabled;
+			} else if (action !== "" && action !== "status") {
+				ctx.ui.notify("Usage: /context-paging [on|off|status]", "warning");
+				return;
+			}
+			ctx.ui.notify(`Context paging is ${isEnabled() ? "enabled" : "disabled"} for this session.`, "info");
+		},
+	});
+
 	registerContextPagingTools(pi, {
-		isEnabled: () => resolvedSettings.enabled,
+		isEnabled,
 		snapshot,
 	});
 
 	pi.on("session_start", async (_event, ctx) => {
+		sessionEnabled = undefined;
 		resetPagingState();
 		invalidatingBranchEntries = new Set();
 		if (!settingsSources) {
@@ -163,7 +182,7 @@ export default function contextPagingExtension(
 		if (id) invalidatingBranchEntries.add(id);
 	});
 	pi.on("context", (event, ctx) => {
-		if (!resolvedSettings.enabled) return;
+		if (!isEnabled()) return;
 		warnAboutTrimTarget(ctx);
 
 		let rawHistoryItems: readonly HistoryItem[] | undefined;
@@ -208,7 +227,7 @@ export default function contextPagingExtension(
 		}
 	});
 	pi.on("session_before_compact", async (event) => {
-		if (!resolvedSettings.enabled) return;
+		if (!isEnabled()) return;
 		if (event.reason === "threshold" || event.reason === "overflow") return { cancel: true };
 		usageTracker.clear();
 	});

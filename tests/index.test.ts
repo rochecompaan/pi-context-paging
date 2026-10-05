@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import {
 	buildSessionProjection, estimateTokens,
-	type SessionBeforeForkEvent, type SessionBeforeSwitchEvent, type SessionBeforeTreeEvent,
+	type RegisteredCommand, type SessionBeforeForkEvent, type SessionBeforeSwitchEvent, type SessionBeforeTreeEvent,
 } from "@earendil-works/pi-coding-agent";
 import { ContextCutState } from "../src/context-cut.ts";
 import { ContextUsageTracker } from "../src/context-usage.ts";
@@ -65,6 +65,7 @@ const statusTokens = (usage: number, suffix: readonly object[]) =>
 
 function createHarness(settings: Settings | null = { globalSettings: {}, projectTrusted: false }) {
 	const handlers = new Map<string, Handler>();
+	const commands = new Map<string, Omit<RegisteredCommand, "name" | "sourceInfo">>();
 	const tools: any[] = [];
 	const notifications: Array<{ message: string; level: string }> = [];
 	let branch: any[] = branchFor("initial");
@@ -77,6 +78,7 @@ function createHarness(settings: Settings | null = { globalSettings: {}, project
 	let activeTools = ["small", "missing"];
 	const pi = {
 		on(name: string, handler: Handler) { handlers.set(name, handler); },
+		registerCommand(name: string, command: Omit<RegisteredCommand, "name" | "sourceInfo">) { commands.set(name, command); },
 		registerTool(tool: any) { tools.push(tool); },
 		appendEntry() { appends++; },
 		getActiveTools: () => activeTools,
@@ -108,6 +110,7 @@ function createHarness(settings: Settings | null = { globalSettings: {}, project
 	contextPagingExtension(pi as any, settings ?? undefined);
 	return {
 		handlers,
+		commands,
 		tools,
 		ctx,
 		notifications,
@@ -126,6 +129,12 @@ function createHarness(settings: Settings | null = { globalSettings: {}, project
 
 async function emit(harness: ReturnType<typeof createHarness>, name: string, event: any) {
 	return await harness.handlers.get(name)?.(event, harness.ctx);
+}
+
+async function runPagingCommand(harness: ReturnType<typeof createHarness>, args: string) {
+	const command = harness.commands.get("context-paging");
+	assert.ok(command, "the context-paging command must be registered");
+	await command.handler(args, harness.ctx as any);
 }
 
 async function searchIds(harness: ReturnType<typeof createHarness>, query: string) {
@@ -549,6 +558,10 @@ test("clears independently re-established measured accounting for lifecycle chan
 	const invalidators: Array<[string, (harness: ReturnType<typeof createHarness>) => Promise<void>]> = [
 		["session tree", (harness) => emit(harness, "session_tree", {}).then(() => undefined)],
 		["model", (harness) => emit(harness, "model_select", {}).then(() => undefined)],
+		["context-paging off/on", async (harness) => {
+			await runPagingCommand(harness, "off");
+			await runPagingCommand(harness, "on");
+		}],
 		["compaction", (harness) => emit(harness, "session_compact", {}).then(() => undefined)],
 		["session", (harness) => emit(harness, "session_start", { reason: "new" }).then(() => undefined)],
 		["manual compaction", (harness) => emit(harness, "session_before_compact", { reason: "manual" }).then(() => undefined)],
@@ -728,6 +741,134 @@ test("cancels only automatic compaction and leaves disabled paging inert", async
 	assert.equal(await emit(disabled, "context", { messages }), undefined);
 });
 
+test("context-paging status reports the effective state without changing it", async () => {
+	for (const enabled of [true, false]) {
+		const harness = createHarness({ globalSettings: { contextPaging: { enabled } }, projectTrusted: false });
+		for (const args of ["", "status", "  status  "]) {
+			await runPagingCommand(harness, args);
+			assert.match(harness.notifications.at(-1)!.message, enabled ? /enabled/ : /disabled/);
+			assert.equal(harness.notifications.at(-1)!.level, "info");
+			assert.deepEqual(await emit(harness, "session_before_compact", { reason: "threshold" }), enabled ? { cancel: true } : undefined);
+		}
+	}
+});
+
+test("context-paging off leaves outgoing context unchanged and disables all recovery tools", async () => {
+	const { harness, messages } = resetFixture();
+	const before = structuredClone(harness.branch());
+	await runPagingCommand(harness, "  off  ");
+	assert.match(harness.notifications.at(-1)!.message, /disabled.*session/);
+	assert.equal(await emit(harness, "context", { messages }), undefined);
+	for (const reason of ["threshold", "overflow", "manual"]) {
+		assert.equal(await emit(harness, "session_before_compact", { reason }), undefined);
+	}
+	for (const tool of harness.tools) {
+		await assert.rejects(() => tool.execute("call", {}, undefined, undefined, harness.ctx), /recovery tools are disabled/);
+	}
+	assert.deepEqual(harness.branch(), before);
+	assert.equal(harness.appendCalls(), 0);
+	assert.equal(harness.abortCalls(), 0);
+});
+
+test("context-paging on overrides disabled settings and uses the configured token budget", async () => {
+	const { harness, messages } = resetFixture(false);
+	await runPagingCommand(harness, "on");
+	assert.match(harness.notifications.at(-1)!.message, /enabled.*session/);
+	const selection = await emit(harness, "context", { messages }) as any;
+	assert.equal(hasMarker(selection.messages, "RESET_A request"), false);
+	assert.match(marker(selection.messages[0]), /1,000-token rolling window/);
+	assert.ok((await searchIds(harness, "RESET_A request")).includes("reset-0"));
+	for (const reason of ["threshold", "overflow"]) {
+		assert.deepEqual(await emit(harness, "session_before_compact", { reason }), { cancel: true });
+	}
+	assert.equal(await emit(harness, "session_before_compact", { reason: "manual" }), undefined);
+	assert.equal(harness.abortCalls(), 0);
+});
+
+test("context-paging rejects invalid arguments without changing state or a committed cut", async () => {
+	const { harness, messages } = resetFixture();
+	const first = await emit(harness, "context", { messages }) as any;
+	assert.equal(hasMarker(first.messages, "RESET_A request"), false);
+	harness.ctx.getSystemPrompt = () => "system";
+	for (const args of ["enable", "on off", "status extra"]) {
+		await runPagingCommand(harness, args);
+		assert.equal(harness.notifications.at(-1)!.level, "warning");
+		assert.match(harness.notifications.at(-1)!.message, /context-paging.*on.*off.*status/);
+		const selection = await emit(harness, "context", { messages }) as any;
+		assert.deepEqual(selection.messages, first.messages);
+	}
+	await runPagingCommand(harness, "off");
+	await runPagingCommand(harness, "invalid");
+	assert.equal(await emit(harness, "context", { messages }), undefined);
+});
+
+test("context-paging preserves a cut for status and repeated on but resets it across off/on", async () => {
+	const { harness, messages } = resetFixture();
+	const first = await emit(harness, "context", { messages }) as any;
+	assert.equal(hasMarker(first.messages, "RESET_A request"), false);
+	harness.ctx.getSystemPrompt = () => "system";
+	for (const args of ["", "status", "on", "on"]) {
+		await runPagingCommand(harness, args);
+		const selected = await emit(harness, "context", { messages }) as any;
+		assert.deepEqual(selected.messages, first.messages);
+	}
+	await runPagingCommand(harness, "off");
+	await runPagingCommand(harness, "on");
+	const restored = await emit(harness, "context", { messages }) as any;
+	assert.equal(hasMarker(restored.messages, "RESET_A request"), true);
+	assert.equal(hasMarker(restored.messages, "Context paging notice"), false);
+});
+
+test("context-paging resets its override at every session start", async () => {
+	for (const enabled of [true, false]) {
+		const harness = createHarness({ globalSettings: { contextPaging: { enabled } }, projectTrusted: false });
+		for (const reason of ["startup", "new", "resume", "fork", "reload"]) {
+			await runPagingCommand(harness, enabled ? "off" : "on");
+			await emit(harness, "session_start", { reason });
+			await runPagingCommand(harness, "status");
+			assert.match(harness.notifications.at(-1)!.message, enabled ? /enabled/ : /disabled/);
+			assert.deepEqual(await emit(harness, "session_before_compact", { reason: "threshold" }), enabled ? { cancel: true } : undefined);
+		}
+	}
+});
+
+test("context-paging keeps its override through branch navigation, model changes, and manual compaction", async () => {
+	for (const enabled of [true, false]) {
+		const harness = createHarness({ globalSettings: { contextPaging: { enabled } }, projectTrusted: false });
+		await runPagingCommand(harness, enabled ? "off" : "on");
+		for (const name of ["session_tree", "model_select", "session_compact"]) {
+			await emit(harness, name, {});
+			assert.deepEqual(await emit(harness, "session_before_compact", { reason: "threshold" }), enabled ? undefined : { cancel: true });
+		}
+	}
+});
+
+test("context-paging changes neither saved settings nor session entries", async () => {
+	const previousHome = process.env.HOME;
+	const home = await mkdtemp(join(tmpdir(), "context-paging-command-"));
+	try {
+		process.env.HOME = home;
+		const agentDirectory = join(home, ".pi", "agent");
+		const settingsPath = join(agentDirectory, "settings.json");
+		await mkdir(agentDirectory, { recursive: true });
+		for (const enabled of [true, false]) {
+			const saved = JSON.stringify({ contextPaging: { enabled, tokenBudget: 96_000 }, unrelated: "unchanged" });
+			await writeFile(settingsPath, saved);
+			const harness = createHarness(null);
+			await emit(harness, "session_start", { reason: "startup" });
+			await runPagingCommand(harness, enabled ? "off" : "on");
+			assert.equal(await readFile(settingsPath, "utf8"), saved);
+			assert.equal(harness.appendCalls(), 0);
+			await emit(harness, "session_start", { reason: "reload" });
+			assert.deepEqual(await emit(harness, "session_before_compact", { reason: "threshold" }), enabled ? { cancel: true } : undefined);
+		}
+	} finally {
+		if (previousHome === undefined) delete process.env.HOME;
+		else process.env.HOME = previousHome;
+		await rm(home, { recursive: true, force: true });
+	}
+});
+
 // Frontier lifecycle: real selector/tracker, canonical custom projection, no provider calls.
 function integrationFixture(kind: "completed" | "active" | "custom-active"): PagingFixture {
 	const fixture = pagingFixture(kind);
@@ -750,8 +891,8 @@ function fixtureHarness(fixture: PagingFixture) {
 	return harness;
 }
 
-function resetFixture() {
-	const harness = createHarness({ globalSettings: { contextPaging: { tokenBudget: 1_000 } }, projectTrusted: false });
+function resetFixture(enabled = true) {
+	const harness = createHarness({ globalSettings: { contextPaging: { enabled, tokenBudget: 1_000 } }, projectTrusted: false });
 	const messages = ["RESET_A", "RESET_B", "RESET_C"].flatMap((id) => [user(`${id} request`), assistant(`${id} ${"x".repeat(960)}`)]);
 	messages.push(user("RESET_ACTIVE"));
 	harness.setBranch(messages.map((message, index) => entry(`reset-${index}`, message)));

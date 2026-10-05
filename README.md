@@ -73,13 +73,13 @@ The model decides when to search.
 From npm:
 
 ```sh
-pi install npm:@rochecompaan/pi-context-paging@0.2.1
+pi install npm:@rochecompaan/pi-context-paging@0.3.0
 ```
 
 From the GitHub release tag:
 
 ```sh
-pi install git:github.com/rochecompaan/pi-context-paging@v0.2.1
+pi install git:github.com/rochecompaan/pi-context-paging@v0.3.0
 ```
 
 After installation, restart Pi.
@@ -128,6 +128,23 @@ If you set a target at or above the budget, there is no headroom between cuts.
 The extension keeps stable cuts, but it trims to the effective budget instead.
 It warns once for each budget and target pair in one Pi process.
 A restart can repeat the warning.
+
+## Session command
+
+Use `/context-paging` to change paging for the current session only:
+
+| Command | Effect |
+| --- | --- |
+| `/context-paging on` | Enable paging and recovery tools. |
+| `/context-paging off` | Disable paging and recovery tools. Pi uses its normal context and automatic compaction behavior. |
+| `/context-paging` or `/context-paging status` | Show whether paging is enabled or disabled. |
+
+The command does not change saved settings or stored session history.
+A state change clears the remembered cut point and token accounting.
+Repeating `on` or `off` does not clear this state.
+
+Branch navigation, model changes, and manual compaction keep the session choice.
+A new session, a resume, a fork, or an extension reload restores the saved settings.
 
 ## Recovery tools
 
@@ -210,6 +227,14 @@ A successful manual compaction resets the cut point.
 
 Read [the architecture document](docs/architecture.md) for module and lifecycle details.
 
+## Changes in 0.3.0
+
+- `/context-paging on` and `/context-paging off` change paging for the current session only.
+- `/context-paging` and `/context-paging status` show the current state.
+- The command leaves saved settings and stored history unchanged.
+- A new session, a resume, a fork, or an extension reload restores saved settings. Branch navigation keeps the session choice.
+- Actual state changes clear the remembered cut point and token accounting. Repeated choices and status queries keep both.
+
 ## Changes in 0.2.1
 
 - The README now explains context paging in simple English. It describes why compaction and handoff lose recent detail, and how a bounded window keeps the model out of the dumb zone.
@@ -267,7 +292,7 @@ pi update --extensions
 Remove the package:
 
 ```sh
-pi remove npm:@rochecompaan/pi-context-paging@0.2.1
+pi remove npm:@rochecompaan/pi-context-paging@0.3.0
 ```
 
 ## License

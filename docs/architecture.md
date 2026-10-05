@@ -4,7 +4,7 @@
 
 Pi loads `src/index.ts` through the package manifest.
 The extension factory is the only public code seam.
-Settings and registered tools form the supported caller interface.
+Settings, the `/context-paging` command, and registered tools form the supported caller interface.
 
 ## Raw branch projection
 
@@ -133,6 +133,14 @@ When normal paging resumes, its frozen notice returns unchanged. Part 1 does not
 ## Lifecycle
 
 `index.ts` resolves global and trusted-project settings at session start.
+The `/context-paging on|off|status` command keeps an optional enabled override in memory.
+No arguments show the current state. Invalid arguments show usage without changing state.
+Paging, recovery tools, trim-target warnings, and automatic-compaction cancellation use the same effective enabled state.
+An actual enabled-state change resets cut state and accounting. Repeated choices and status queries do not reset either.
+Every `session_start` clears the override before settings load, including new sessions, resumes, forks, and reloads.
+Branch navigation, model changes, and compaction do not clear the override.
+The command does not write settings or session entries.
+
 It refreshes projected history after turns and session-tree changes.
 It reuses the navigator until the visible branch IDs change.
 The `context` event prepares usage from the original request, applies the selector, records the outgoing snapshot, and commits successful cut state.
