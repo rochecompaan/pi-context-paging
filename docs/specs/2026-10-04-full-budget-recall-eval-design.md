@@ -2,7 +2,7 @@
 
 Date: 2026-10-04
 
-Status: Design approved in chat. Written-spec review remains open.
+Status: Written spec approved for implementation planning on 2026-10-05.
 
 ## Purpose
 
