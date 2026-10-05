@@ -85,7 +85,7 @@ export function registerContextPagingTools(
 	pi.registerTool({
 		name: "search_history",
 		label: "Search History",
-		description: "search_history finds compact recovery references in paged session history. Use load_history for exact items or read_context_output for repeated output pages.",
+		description: "search_history finds compact public recovery references in paged session history. Use load_history for public items or read_context_output for repeated output pages.",
 		parameters: searchHistoryParameters,
 		async execute(_toolCallId, params: SearchHistoryInput, _signal, _onUpdate, ctx) {
 			const current = snapshot(dependencies, ctx);
@@ -100,7 +100,7 @@ export function registerContextPagingTools(
 	pi.registerTool({
 		name: "browse_history",
 		label: "Browse History",
-		description: "browse_history returns compact recovery references around paged session history. Use load_history for exact items or read_context_output for repeated output pages.",
+		description: "browse_history returns compact public recovery references around paged session history. Use load_history for public items or read_context_output for repeated output pages.",
 		parameters: browseHistoryParameters,
 		async execute(_toolCallId, params: HistoryBrowseInput, _signal, _onUpdate, ctx) {
 			const current = snapshot(dependencies, ctx);
@@ -111,7 +111,7 @@ export function registerContextPagingTools(
 	pi.registerTool({
 		name: "load_history",
 		label: "Load History",
-		description: "load_history returns exact recovery items in the requested order. Use read_context_output for repeated output pages from a loaded model turn.",
+		description: "load_history returns public recovery items in the requested order. Omitted assistant blocks are null, preserving original contentIndex values. Use read_context_output for exact public output pages.",
 		parameters: loadHistoryParameters,
 		async execute(_toolCallId, params: { historyIds: string[] }, _signal, _onUpdate, ctx) {
 			const current = snapshot(dependencies, ctx);
@@ -122,7 +122,7 @@ export function registerContextPagingTools(
 	pi.registerTool({
 		name: "read_context_output",
 		label: "Read Context Output",
-		description: "read_context_output returns one exact recovery output page. Repeat read_context_output with nextOffset until nextOffset is null.",
+		description: "read_context_output returns one exact public recovery output page using original assistant contentIndex values. Non-public blocks and recovery-tool results are unavailable. Repeat read_context_output with nextOffset until nextOffset is null.",
 		parameters: readContextOutputParameters,
 		async execute(_toolCallId, params: ContextOutputReadInput, _signal, _onUpdate, ctx) {
 			const current = snapshot(dependencies, ctx);

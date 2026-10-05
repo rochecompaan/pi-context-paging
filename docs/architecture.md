@@ -19,17 +19,31 @@ Failed text-only responses also remain in raw history.
 
 ## History navigation
 
-`navigator.ts` builds compact search records from projected items.
+`recovery-content.ts` creates a public recovery view without changing raw branch items.
+It permits assistant text and tool-call blocks, with provider signatures removed.
+Thinking, redacted thinking, and unknown assistant blocks become `null` slots.
+These slots preserve original assistant content indices.
+User content, tool arguments, and ordinary tool results remain exact.
+The filter does not recursively remove application-owned fields or text.
+
+`navigator.ts` builds compact search records from this public view.
+Search and previews skip the omitted slots.
 Search serializes large tool output only when a query needs it.
 The navigator caches that corpus until visible history IDs change.
 Browse uses stable history IDs and sequence numbers.
-Load returns complete items atomically.
+Load returns public items atomically.
 
 ## Exact output paging
 
-`output-pages.ts` serializes one assistant or tool-result output value.
-It returns bounded character pages and an exact next offset.
+`output-pages.ts` addresses the raw projection with original assistant indices.
+It applies the same public-block filter before serialization and rejects omitted blocks.
+Ordinary tool-result output remains exact.
+The page reader rejects recovery-tool results, including older replies that can contain serialized private data.
+It checks both the stored call name and the result name.
+
+The reader returns bounded character pages and an exact next offset for public JSON.
 It never replaces large values with a summary.
+Raw session storage and normal provider-message handling remain unchanged.
 
 ## Settings and limits
 

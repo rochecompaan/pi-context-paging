@@ -1,4 +1,5 @@
 import { isPagingToolTurn, type HistoryItem } from "./history.ts";
+import { recoveryHistoryItem, type RecoveryHistoryItem } from "./recovery-content.ts";
 
 const K1 = 1.2;
 const B = 0.75;
@@ -61,7 +62,7 @@ function serialized(value: unknown): string {
 	return result === undefined ? "" : result;
 }
 
-function itemText(item: HistoryItem): string {
+function itemText(item: RecoveryHistoryItem): string {
 	if (item.kind === "user") {
 		return typeof item.userMessage.content === "string"
 			? item.userMessage.content
@@ -77,7 +78,7 @@ function itemText(item: HistoryItem): string {
 	});
 	const fileSegments = item.metadata.files.flatMap((file) => file.split(/[\\/]/));
 	return [
-		serialized(item.assistantMessage.content),
+		serialized(item.assistantMessage.content.filter((block) => block !== null)),
 		...toolCalls.flatMap((call) => [call.name, serialized(call.arguments)]),
 		...item.toolResults.map((result) => serialized(result.content)),
 		...item.metadata.files,
@@ -85,22 +86,18 @@ function itemText(item: HistoryItem): string {
 	].join(" ");
 }
 
-function previewFor(item: HistoryItem): string {
+function previewFor(item: RecoveryHistoryItem): string {
 	if (item.kind === "user") {
 		const content = item.userMessage.content;
 		return (typeof content === "string" ? content : serialized(content)).replace(/\s+/g, " ").trim().slice(0, 160);
 	}
-	const content = item.assistantMessage.content.map((block) =>
-		typeof block === "object" && block !== null
-		&& (block as { type?: unknown }).type === "text"
-		&& typeof (block as { text?: unknown }).text === "string"
-			? (block as { text: string }).text
-			: serialized(block),
+	const content = item.assistantMessage.content.flatMap((block) =>
+		block === null ? [] : [block.type === "text" ? block.text : serialized(block)],
 	).join(" ");
 	return content.replace(/\s+/g, " ").trim().slice(0, 160);
 }
 
-function buildReference(item: HistoryItem, index: number, items: readonly HistoryItem[]): HistoryReference {
+function buildReference(item: RecoveryHistoryItem, index: number, items: readonly RecoveryHistoryItem[]): HistoryReference {
 	const metadata = item.kind === "modelTurn" ? item.metadata : { tools: [], files: [], failed: false };
 	return {
 		historyId: item.id,
@@ -167,11 +164,11 @@ function aroundIndexes(length: number, anchorIndex: number, count: number, strid
 	return candidates.slice(start, start + count);
 }
 
-/** Indexes visible history items for compact search, browsing, and exact loads. */
+/** Indexes public recovery content without changing the raw branch projection. */
 export class HistoryNavigator {
-	private items: HistoryItem[] = [];
-	private itemById = new Map<string, HistoryItem>();
-	private itemBySequence = new Map<number, HistoryItem>();
+	private items: RecoveryHistoryItem[] = [];
+	private itemById = new Map<string, RecoveryHistoryItem>();
+	private itemBySequence = new Map<number, RecoveryHistoryItem>();
 	private references: HistoryReference[] = [];
 	private searchDocuments: SearchDocument[] | undefined;
 	private documentFrequencies = new Map<string, number>();
@@ -184,7 +181,7 @@ export class HistoryNavigator {
 	rebuild(items: readonly HistoryItem[]): void {
 		this.items = items
 			.filter((item) => !isPagingToolTurn(item))
-			.map((item, sequence) => ({ ...item, sequence }));
+			.map((item, sequence) => ({ ...recoveryHistoryItem(item), sequence }));
 		this.itemById = new Map(this.items.map((item) => [item.id, item]));
 		this.itemBySequence = new Map(this.items.map((item) => [item.sequence, item]));
 		this.references = this.items.map((item, index) => buildReference(item, index, this.items));
@@ -233,7 +230,7 @@ export class HistoryNavigator {
 		return indexes.map((index) => this.references[index]);
 	}
 
-	load(historyIds: readonly string[]): HistoryItem[] {
+	load(historyIds: readonly string[]): RecoveryHistoryItem[] {
 		if (!Array.isArray(historyIds) || historyIds.length < 1 || historyIds.length > 3) {
 			invalid("historyIds must contain one to three IDs");
 		}
@@ -243,7 +240,7 @@ export class HistoryNavigator {
 		if (missingIndex !== -1) {
 			throw new HistoryNavigatorError("UNKNOWN_HISTORY_ID", `Unknown history ID ${historyIds[missingIndex]}`);
 		}
-		return resolved as HistoryItem[];
+		return resolved as RecoveryHistoryItem[];
 	}
 
 	private buildSearchIndex(): SearchDocument[] {
@@ -277,14 +274,14 @@ export class HistoryNavigator {
 		return matched ? score : undefined;
 	}
 
-	private matchesFilters(item: HistoryItem, input: HistorySearchInput): boolean {
+	private matchesFilters(item: RecoveryHistoryItem, input: HistorySearchInput): boolean {
 		const metadata = item.kind === "modelTurn" ? item.metadata : { tools: [], files: [], failed: false };
 		return (input.files === undefined || input.files.every((file) => metadata.files.includes(file)))
 			&& (input.tools === undefined || input.tools.every((tool) => metadata.tools.includes(tool)))
 			&& (input.failed === undefined || input.failed === metadata.failed);
 	}
 
-	private resolveAnchor(input: HistoryBrowseInput): HistoryItem | undefined {
+	private resolveAnchor(input: HistoryBrowseInput): RecoveryHistoryItem | undefined {
 		if (input.historyId === undefined && input.sequence === undefined) return undefined;
 		const item = input.historyId === undefined
 			? this.itemBySequence.get(input.sequence!)

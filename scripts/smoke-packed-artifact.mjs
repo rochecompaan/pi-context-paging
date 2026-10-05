@@ -19,6 +19,7 @@ const expectedFiles = [
   "src/index.ts",
   "src/navigator.ts",
   "src/output-pages.ts",
+  "src/recovery-content.ts",
   "src/selection-history.ts",
   "src/settings.ts",
   "src/stats.ts",

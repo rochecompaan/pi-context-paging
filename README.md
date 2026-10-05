@@ -3,7 +3,8 @@
 `pi-context-paging` gives Pi a rolling context window with a fixed token budget.
 When the window is full, the oldest history leaves the window.
 The stored session history does not change.
-The model gets tools to find that older history and load it again as exact text.
+The model gets tools to find that older history and load its public content again as exact text.
+Private assistant blocks remain in stored history, but recovery tools do not return them.
 The extension never summarizes history.
 
 ## The problem with compaction and handoff
@@ -59,8 +60,8 @@ This is better than compaction or handoff for these reasons:
 - **The model stays out of the dumb zone.** The extension keeps requests at or below the token budget. If you set the budget below the point where the model gets worse, the model always works with a short context.
 - **The recent context stays exact.** The newest messages and tool results stay in the window as stored.
 - **The oldest history leaves first.** The extension removes whole turns from the start of the history. It does not choose by content.
-- **Nothing is lost.** The model can search for any older item and load it again as exact text.
-- **Old detail returns on request.** A summary must guess in advance which details matter. A recovery tool returns the exact item that the model asks for.
+- **Nothing is lost from storage.** The complete session stays stored. The model can recover public content from older items as exact text.
+- **Old detail returns on request.** A summary must guess in advance which details matter. A recovery tool returns the exact public content that the model asks for.
 - **There is no surprise compaction.** The extension cancels automatic compaction while it is enabled. You can still compact by hand.
 
 One behavior is different from compaction.
@@ -73,13 +74,13 @@ The model decides when to search.
 From npm:
 
 ```sh
-pi install npm:@rochecompaan/pi-context-paging@0.3.2
+pi install npm:@rochecompaan/pi-context-paging@0.3.3
 ```
 
 From the GitHub release tag:
 
 ```sh
-pi install git:github.com/rochecompaan/pi-context-paging@v0.3.2
+pi install git:github.com/rochecompaan/pi-context-paging@v0.3.3
 ```
 
 After installation, restart Pi.
@@ -201,13 +202,32 @@ Session shutdown removes the status key. Headless sessions do not call the statu
 | --- | --- |
 | `search_history` | Find compact references to history by text, file, tool, or failure state. |
 | `browse_history` | Move backward, forward, or around one history item. |
-| `load_history` | Load complete stored history items by stable ID. |
-| `read_context_output` | Read exact pages of large assistant or tool-result output. |
+| `load_history` | Load public history items by stable ID. |
+| `read_context_output` | Read exact pages of public assistant or ordinary tool-result output. |
 
-Search and browse return compact references.
-Load and read return the exact stored content.
+Search and browse return compact references to public content.
+Load and read preserve exact public text, tool-call data, and ordinary tool results.
 The tools never summarize.
 When paging is disabled, the tools refuse to run.
+
+### Private assistant content
+
+Recovery tools exclude assistant thinking blocks, redacted thinking payloads, and provider signatures.
+Search does not index these values, and previews do not show them.
+Only assistant text and tool-call blocks enter the recovery view.
+Unknown assistant block types also stay out of this view.
+
+Loaded assistant content uses `null` for each omitted block.
+These slots preserve the original array indices.
+The page reader uses those original `contentIndex` values and rejects reads of omitted blocks.
+It also rejects results from the four recovery tools, because older saved replies can contain private assistant data.
+The original history item remains the source for public output.
+
+This filter does not change stored history or the normal provider-message format.
+It does not remove matching words or fields from user text, tool arguments, or ordinary tool results.
+The filter reduces accidental internal-reasoning extraction, but provider safeguards can still reject a request.
+Previously returned private content can remain in an existing session.
+A new session avoids replay of those older tool replies.
 
 ## How the extension selects the window
 
@@ -275,6 +295,15 @@ Manual compaction remains available.
 A successful manual compaction resets the cut point.
 
 Read [the architecture document](docs/architecture.md) for module and lifecycle details.
+
+## Changes in 0.3.3
+
+- Recovery tools exclude assistant thinking, redacted thinking payloads, and provider signatures from search, previews, loads, and output pages.
+- Loaded assistant content uses `null` slots for omitted blocks. Original `contentIndex` values remain unchanged.
+- Output pages reject private assistant blocks and saved recovery-tool replies that can contain older private data.
+- Public text, tool-call data, and ordinary tool results remain exact. Stored history and normal provider-message handling stay unchanged.
+- If an existing session still triggers a provider safeguard after the upgrade, start a new session. Older tool replies remain stored.
+- Provider safeguards can still reject requests. This release prevents structured private content from entering new recovery replies.
 
 ## Changes in 0.3.2
 
@@ -358,7 +387,7 @@ pi update --extensions
 Remove the package:
 
 ```sh
-pi remove npm:@rochecompaan/pi-context-paging@0.3.2
+pi remove npm:@rochecompaan/pi-context-paging@0.3.3
 ```
 
 ## License
