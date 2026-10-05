@@ -73,13 +73,13 @@ The model decides when to search.
 From npm:
 
 ```sh
-pi install npm:@rochecompaan/pi-context-paging@0.3.0
+pi install npm:@rochecompaan/pi-context-paging@0.3.1
 ```
 
 From the GitHub release tag:
 
 ```sh
-pi install git:github.com/rochecompaan/pi-context-paging@v0.3.0
+pi install git:github.com/rochecompaan/pi-context-paging@v0.3.1
 ```
 
 After installation, restart Pi.
@@ -145,6 +145,17 @@ Repeating `on` or `off` does not clear this state.
 
 Branch navigation, model changes, and manual compaction keep the session choice.
 A new session, a resume, a fork, or an extension reload restores the saved settings.
+
+### Footer status
+
+In UI sessions, the extension publishes its effective state under the `context-paging` status key.
+The text is exactly `paging on` or `paging off`, without ANSI styling.
+Custom footers can read this value from `footerData.getExtensionStatuses()`.
+
+The status reflects saved settings at session start and the current session choice after every `on` or `off` command.
+Repeated choices also publish the status.
+If settings fail to load, the status shows `paging off`.
+Session shutdown removes the status key. Headless sessions do not call the status UI.
 
 ## Recovery tools
 
@@ -227,6 +238,14 @@ A successful manual compaction resets the cut point.
 
 Read [the architecture document](docs/architecture.md) for module and lifecycle details.
 
+## Changes in 0.3.1
+
+- The `context-paging` extension status reports the effective state as plain `paging on` or `paging off` text.
+- Session start and every `on` or `off` command publish the status, including repeated choices.
+- A new session restores the saved state in the status. A settings read error publishes `paging off`.
+- Session shutdown removes the status. Headless sessions do not call the status UI.
+- Paging, recovery, and compaction behavior stay unchanged.
+
 ## Changes in 0.3.0
 
 - `/context-paging on` and `/context-paging off` change paging for the current session only.
@@ -292,7 +311,7 @@ pi update --extensions
 Remove the package:
 
 ```sh
-pi remove npm:@rochecompaan/pi-context-paging@0.3.0
+pi remove npm:@rochecompaan/pi-context-paging@0.3.1
 ```
 
 ## License

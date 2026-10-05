@@ -4,7 +4,7 @@
 
 Pi loads `src/index.ts` through the package manifest.
 The extension factory is the only public code seam.
-Settings, the `/context-paging` command, and registered tools form the supported caller interface.
+Settings, the `/context-paging` command, registered tools, and the `context-paging` extension status form the supported caller interface.
 
 ## Raw branch projection
 
@@ -140,6 +140,14 @@ An actual enabled-state change resets cut state and accounting. Repeated choices
 Every `session_start` clears the override before settings load, including new sessions, resumes, forks, and reloads.
 Branch navigation, model changes, and compaction do not clear the override.
 The command does not write settings or session entries.
+
+When `ctx.hasUI` is true, the extension publishes `isEnabled()` with `ctx.ui.setStatus("context-paging", text)`.
+The text is exactly `paging on` or `paging off`, without ANSI styling.
+Custom footers read the value from `footerData.getExtensionStatuses()`.
+Session start publishes the status after settings resolution.
+If settings load throws, the extension publishes the disabled fallback status. The settings error still propagates. Every `on` or `off` command publishes the effective status, including repeated choices.
+Status queries and invalid arguments leave the status alone.
+Session shutdown clears only this status key. Headless sessions skip these UI calls.
 
 It refreshes projected history after turns and session-tree changes.
 It reuses the navigator until the visible branch IDs change.

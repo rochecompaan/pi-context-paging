@@ -73,6 +73,9 @@ export default function contextPagingExtension(
 		: resolveContextPagingSettings({ globalSettings: { contextPaging: { enabled: false } }, projectTrusted: false });
 	let sessionEnabled: boolean | undefined;
 	const isEnabled = () => sessionEnabled ?? resolvedSettings.enabled;
+	const publishStatus = (ctx: ExtensionContext) => {
+		if (ctx.hasUI) ctx.ui.setStatus("context-paging", isEnabled() ? "paging on" : "paging off");
+	};
 	let allItems: HistoryItem[] = [];
 	const navigator = new HistoryNavigator();
 	const usageTracker = new ContextUsageTracker();
@@ -140,6 +143,7 @@ export default function contextPagingExtension(
 				const enabled = action === "on";
 				if (enabled !== isEnabled()) resetPagingState();
 				sessionEnabled = enabled;
+				publishStatus(ctx);
 			} else if (action !== "" && action !== "status") {
 				ctx.ui.notify("Usage: /context-paging [on|off|status]", "warning");
 				return;
@@ -157,11 +161,18 @@ export default function contextPagingExtension(
 		sessionEnabled = undefined;
 		resetPagingState();
 		invalidatingBranchEntries = new Set();
-		if (!settingsSources) {
-			resolvedSettings = { ...resolvedSettings, enabled: false };
-			resolvedSettings = resolveContextPagingSettings(await loadSettings(ctx));
+		try {
+			if (!settingsSources) {
+				resolvedSettings = { ...resolvedSettings, enabled: false };
+				resolvedSettings = resolveContextPagingSettings(await loadSettings(ctx));
+			}
+		} finally {
+			publishStatus(ctx);
 		}
 		refreshSafely(ctx);
+	});
+	pi.on("session_shutdown", (_event, ctx) => {
+		if (ctx.hasUI) ctx.ui.setStatus("context-paging", undefined);
 	});
 	pi.on("turn_end", (event, ctx) => {
 		usageTracker.recordResponse(event.message);

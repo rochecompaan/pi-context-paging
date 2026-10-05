@@ -243,6 +243,7 @@ test("registers only paging lifecycle handlers", () => {
 		"model_select",
 		"session_before_compact",
 		"session_compact",
+		"session_shutdown",
 		"session_start",
 		"session_tree",
 		"turn_end",
