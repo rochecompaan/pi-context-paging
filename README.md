@@ -73,13 +73,13 @@ The model decides when to search.
 From npm:
 
 ```sh
-pi install npm:@rochecompaan/pi-context-paging@0.3.1
+pi install npm:@rochecompaan/pi-context-paging@0.3.2
 ```
 
 From the GitHub release tag:
 
 ```sh
-pi install git:github.com/rochecompaan/pi-context-paging@v0.3.1
+pi install git:github.com/rochecompaan/pi-context-paging@v0.3.2
 ```
 
 After installation, restart Pi.
@@ -149,7 +149,7 @@ A new session, a resume, a fork, or an extension reload restores the saved setti
 
 ### Session stats
 
-The `stats` action is unreleased. Version 0.3.1 does not include it.
+The `stats` action is available from version 0.3.2.
 
 Run `/context-paging stats` to show a read-only report.
 These example values are illustrative:
@@ -276,6 +276,15 @@ A successful manual compaction resets the cut point.
 
 Read [the architecture document](docs/architecture.md) for module and lifecycle details.
 
+## Changes in 0.3.2
+
+- `/context-paging stats` shows a read-only session report with paging on or off.
+- Saved history includes the actual file size and estimated tokens across all branches, including paged-out content.
+- Latest request input uses provider usage or a marked paging estimate. The report also shows the effective budget and model window.
+- Whole-session cache totals include saved usage from responses, tools, warming calls, compaction, and branch summaries.
+- Missing, invalid, unsafe, or default-zero measurements show `unavailable`. Measured zero cache counts remain zero.
+- Stats do not reset cuts, change paging, write history, or call a provider. Recovery and footer status stay unchanged.
+
 ## Changes in 0.3.1
 
 - The `context-paging` extension status reports the effective state as plain `paging on` or `paging off` text.
@@ -349,7 +358,7 @@ pi update --extensions
 Remove the package:
 
 ```sh
-pi remove npm:@rochecompaan/pi-context-paging@0.3.1
+pi remove npm:@rochecompaan/pi-context-paging@0.3.2
 ```
 
 ## License
