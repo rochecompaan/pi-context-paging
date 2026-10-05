@@ -138,6 +138,7 @@ Use `/context-paging` to change paging for the current session only:
 | `/context-paging on` | Enable paging and recovery tools. |
 | `/context-paging off` | Disable paging and recovery tools. Pi uses its normal context and automatic compaction behavior. |
 | `/context-paging` or `/context-paging status` | Show whether paging is enabled or disabled. |
+| `/context-paging stats` | Show saved history size, latest request input, and whole-session cache totals. |
 
 The command does not change saved settings or stored session history.
 A state change clears the remembered cut point and token accounting.
@@ -145,6 +146,43 @@ Repeating `on` or `off` does not clear this state.
 
 Branch navigation, model changes, and manual compaction keep the session choice.
 A new session, a resume, a fork, or an extension reload restores the saved settings.
+
+### Session stats
+
+The `stats` action is unreleased. Version 0.3.1 does not include it.
+
+Run `/context-paging stats` to show a read-only report.
+These example values are illustrative:
+
+```text
+Context paging: on
+
+SESSION — complete saved history
+  Stored size          8.42 MiB
+  History tokens       ~684,230
+
+CONTEXT — latest model request
+  Input tokens         82,412
+  Paging budget        128,000   (64.4% used)
+  Model window         272,000
+
+CACHE — whole-session totals
+  Tokens read          6,421,880
+  Tokens written       384,000
+```
+
+- Stored size is the actual session-file size, including metadata. In-memory sessions have no stored-file measurement.
+- History tokens use Pi's estimates for all saved messages, summaries, and edit replacements. This includes inactive branches and paged-out history.
+- Input tokens describe the latest conversation request, not the next request after its response. The provider count includes cached input and excludes output.
+- Without complete provider usage, the latest outgoing paging selection supplies an estimate. This estimate includes the system prompt, tool definitions, and paging notice.
+- `~` marks estimates. Missing or invalid measurements show `unavailable`, not zero.
+- Cache totals include saved usage from all branches, tool results, warming calls, compaction, and branch summaries. Each saved usage record contributes once.
+- One missing cache component makes its whole-session total unavailable. An all-zero usage record is not a measurement.
+
+The effective budget never exceeds the model window. With paging off, the budget shows `inactive`.
+Cache traffic can exceed stored history because requests reuse the same input.
+These totals describe Pi's saved usage, not a provider invoice or usage that other extensions do not save.
+The stats action does not change paging state, write session entries, or call a provider.
 
 ### Footer status
 

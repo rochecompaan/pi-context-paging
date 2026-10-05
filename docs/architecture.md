@@ -117,6 +117,31 @@ Omitted interrupted exchanges and evicted messages reduce the estimate without l
 The final outgoing request is recorded only after successful selection, including stateless provenance-fallback calls.
 Accounting fallback alone does not reset cut state. Part 1 leaves the existing usage tracker unchanged.
 
+## Read-only session stats
+
+`stats.ts` reads all raw session entries through `getEntries()`, not the active or paged projection.
+File metadata supplies the actual saved byte count. An absent or unreadable file produces `unavailable`.
+Pi's message estimator counts saved text, summaries, and context-edit replacements across all branches.
+The estimate includes originals and replacements because the session file retains both.
+Opaque signatures and other metadata contribute to bytes, not estimated message tokens.
+
+`index.ts` records the latest successful selection estimate without changing usage calibration or cut state.
+A successful response replaces this estimate with `input + cacheRead + cacheWrite`. Output is excluded.
+Lifecycle invalidation clears the transient count. After resume, the latest saved assistant on the active branch can supply measured input.
+A compaction, branch summary, or model-change boundary prevents reuse of an older response count.
+The input row describes the latest conversation request, not the context for the next request after its response.
+
+Cache totals sum each saved usage record once across all branches.
+Records include assistant responses, tool results with usage, warming entries, compaction, and branch summaries.
+Missing, invalid, or unsafe counters make the affected total unavailable.
+Explicit zero cache counters remain zero when the record contains other measured token counts.
+A record with only zero or missing counters supplies no measurement.
+The totals describe recorded usage, not unrecorded calls or provider invoices.
+
+The command reports the effective budget, capped by the positive-finite model window. A disabled budget shows `inactive`.
+The UI notification does not enter model context or saved history.
+The stats action does not refresh navigation, reset accounting, publish footer status, or call a provider.
+
 ## Paging notices
 
 A transient paging notice appears before retained canonical messages after eviction.
@@ -133,7 +158,7 @@ When normal paging resumes, its frozen notice returns unchanged. Part 1 does not
 ## Lifecycle
 
 `index.ts` resolves global and trusted-project settings at session start.
-The `/context-paging on|off|status` command keeps an optional enabled override in memory.
+The `/context-paging on|off|status|stats` command keeps an optional enabled override in memory.
 No arguments show the current state. Invalid arguments show usage without changing state.
 Paging, recovery tools, trim-target warnings, and automatic-compaction cancellation use the same effective enabled state.
 An actual enabled-state change resets cut state and accounting. Repeated choices and status queries do not reset either.
@@ -146,7 +171,7 @@ The text is exactly `paging on` or `paging off`, without ANSI styling.
 Custom footers read the value from `footerData.getExtensionStatuses()`.
 Session start publishes the status after settings resolution.
 If settings load throws, the extension publishes the disabled fallback status. The settings error still propagates. Every `on` or `off` command publishes the effective status, including repeated choices.
-Status queries and invalid arguments leave the status alone.
+Status queries, stats queries, and invalid arguments leave the status alone.
 Session shutdown clears only this status key. Headless sessions skip these UI calls.
 
 It refreshes projected history after turns and session-tree changes.

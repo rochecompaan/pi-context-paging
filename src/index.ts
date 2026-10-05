@@ -12,6 +12,7 @@ import { ContextCutState } from "./context-cut.ts";
 import { isPagingToolTurn, projectActiveBranch, type HistoryItem } from "./history.ts";
 import { HistoryNavigator } from "./navigator.ts";
 import { registerContextPagingTools, type HistorySnapshot } from "./tools.ts";
+import { contextPagingStats, reportedInputTokens, type InputTokenCount } from "./stats.ts";
 
 import {
 	resolveContextPagingSettings,
@@ -80,10 +81,12 @@ export default function contextPagingExtension(
 	const navigator = new HistoryNavigator();
 	const usageTracker = new ContextUsageTracker();
 	const cutState = new ContextCutState();
+	let latestInput: InputTokenCount | undefined;
 	const warnedSettingPairs = new Set<string>();
 	const resetPagingState = () => {
 		usageTracker.clear();
 		cutState.reset();
+		latestInput = undefined;
 	};
 	const warnAboutTrimTarget = (ctx: ExtensionContext) => {
 		const { tokenBudget, trimToTokens, trimToTokensExplicit } = resolvedSettings;
@@ -136,16 +139,24 @@ export default function contextPagingExtension(
 	};
 
 	pi.registerCommand("context-paging", {
-		description: "Enable or disable context paging for this session, or show status",
+		description: "Enable or disable context paging for this session, or show status and stats",
 		handler: async (args, ctx) => {
 			const action = args.trim();
+			if (action === "stats") {
+				try {
+					ctx.ui.notify(await contextPagingStats(ctx, isEnabled(), resolvedSettings.tokenBudget, latestInput), "info");
+				} catch (error) {
+					ctx.ui.notify(`Context paging stats are unavailable: ${errorMessage(error)}`, "warning");
+				}
+				return;
+			}
 			if (action === "on" || action === "off") {
 				const enabled = action === "on";
 				if (enabled !== isEnabled()) resetPagingState();
 				sessionEnabled = enabled;
 				publishStatus(ctx);
 			} else if (action !== "" && action !== "status") {
-				ctx.ui.notify("Usage: /context-paging [on|off|status]", "warning");
+				ctx.ui.notify("Usage: /context-paging [on|off|status|stats]", "warning");
 				return;
 			}
 			ctx.ui.notify(`Context paging is ${isEnabled() ? "enabled" : "disabled"} for this session.`, "info");
@@ -176,6 +187,7 @@ export default function contextPagingExtension(
 	});
 	pi.on("turn_end", (event, ctx) => {
 		usageTracker.recordResponse(event.message);
+		latestInput = reportedInputTokens(event.message) ?? (latestInput?.estimated ? latestInput : undefined);
 		refreshSafely(ctx);
 	});
 	pi.on("session_tree", (_event, ctx) => {
@@ -230,6 +242,7 @@ export default function contextPagingExtension(
 			// Unknown canonical provenance is an empty trusted subset, never the outgoing request.
 			usageTracker.recordSelection(selection.messages, residentTokens, canonicalSessionMessages ?? []);
 			cutState.commit(selection.cutState);
+			latestInput = { tokens: selection.estimatedTokens, estimated: true };
 			return { messages: selection.messages };
 		} catch (error) {
 			ctx.abort();

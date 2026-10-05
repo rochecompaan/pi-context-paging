@@ -21,6 +21,7 @@ const expectedFiles = [
   "src/output-pages.ts",
   "src/selection-history.ts",
   "src/settings.ts",
+  "src/stats.ts",
   "src/tools.ts",
 ].sort();
 const requiredTools = [
