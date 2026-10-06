@@ -7,12 +7,13 @@ import { observeSseUsage, type ProviderUsageObservation } from "./codex-usage.ts
 import { sanitizeArtifact } from "./safe-artifacts.ts";
 export type { ProviderUsageObservation } from "./codex-usage.ts";
 
-export const EVAL_MODEL = { provider: "openai-codex", id: "gpt-6-luna", thinking: "xhigh" } as const;
+import { EVAL_MODEL } from "./experiment-settings.ts";
+export { EVAL_MODEL } from "./experiment-settings.ts";
 export type SafeModelMetadata = Pick<Model<Api>, "provider" | "id" | "api" | "contextWindow" | "maxTokens" | "cost" | "reasoning" | "thinkingLevelMap">;
 export type RequestHooks = {
 	allocateMeta(): RequestMeta;
 	onPayload(meta: RequestMeta, payload: unknown, context: TranscriptContext): Promise<void>;
-	beforeHttpAttempt(meta: RequestMeta): void;
+	beforeHttpAttempt(meta: RequestMeta): void | Promise<void>;
 	onHttpAttemptEnd(meta: RequestMeta, status: number | null): void;
 	onUsageObservation(meta: RequestMeta, observation: ProviderUsageObservation): void;
 };
@@ -53,7 +54,7 @@ export function observeProvider(base: Provider, hooks: RequestHooks): Provider {
 				return replacement;
 			},
 			fetch: async (url, init) => {
-				hooks.beforeHttpAttempt(meta);
+				await hooks.beforeHttpAttempt(meta);
 				let response: Response;
 				try { response = await fetch(url, init); }
 				catch (error) { hooks.onHttpAttemptEnd(meta, null); throw error; }
@@ -78,21 +79,21 @@ const createRuntime: RuntimeFactory = agentDir => ModelRuntime.create({
 export async function prepareCodexRuntime(agentDir: string, hooks: RequestHooks, factory: RuntimeFactory = createRuntime): Promise<PreparedRuntime> {
 	const runtime = await factory(agentDir);
 	const model = runtime.getModel(EVAL_MODEL.provider, EVAL_MODEL.id);
-	if (!model || model.api !== "openai-codex-responses") throw new Error("Exact eval model unavailable");
-	if (!getSupportedThinkingLevels(model).includes(EVAL_MODEL.thinking)) throw new Error("Eval model does not support xhigh");
+	if (!model || model.api !== "openai-codex-responses") throw Object.assign(new Error("Exact eval model unavailable"), { code: "EVAL_MODEL_UNAVAILABLE" });
+	if (!getSupportedThinkingLevels(model).includes(EVAL_MODEL.thinking)) throw Object.assign(new Error("Eval model does not support xhigh"), { code: "EVAL_XHIGH_UNAVAILABLE" });
 	const available = await runtime.getAvailable(EVAL_MODEL.provider);
-	if (!available.some(candidate => candidate.id === EVAL_MODEL.id)) throw new Error("Eval model credentials unavailable");
+	if (!available.some(candidate => candidate.id === EVAL_MODEL.id)) throw Object.assign(new Error("Eval model credentials unavailable"), { code: "EVAL_CREDENTIALS_UNAVAILABLE" });
 	const metadata = metadataFor(model);
 	const fingerprint = metadataFingerprint(metadata);
 	const assertUnchanged = () => {
 		const current = runtime.getModel(EVAL_MODEL.provider, EVAL_MODEL.id);
-		if (!current || metadataFingerprint(metadataFor(current)) !== fingerprint) throw new Error("Eval model metadata changed");
+		if (!current || metadataFingerprint(metadataFor(current)) !== fingerprint) throw Object.assign(new Error("Eval model metadata changed"), { code: "EVAL_METADATA_CHANGED" });
 	};
 	const provider = runtime.getProvider(EVAL_MODEL.provider);
-	if (!provider) throw new Error("Eval provider unavailable");
+	if (!provider) throw Object.assign(new Error("Eval provider unavailable"), { code: "EVAL_PROVIDER_UNAVAILABLE" });
 	runtime.registerNativeProvider(observeProvider(provider, { ...hooks,
 		allocateMeta: () => { assertUnchanged(); return hooks.allocateMeta(); },
-		beforeHttpAttempt: meta => { assertUnchanged(); hooks.beforeHttpAttempt(meta); },
+		beforeHttpAttempt: meta => { assertUnchanged(); return hooks.beforeHttpAttempt(meta); },
 	}));
 	assertUnchanged();
 	return { runtime, model, metadata, metadataFingerprint: fingerprint, assertUnchanged };

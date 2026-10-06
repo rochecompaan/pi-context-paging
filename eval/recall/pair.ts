@@ -5,11 +5,12 @@ import { exposures, finishStage, scoreProbeArm, stageOpportunity, successfulComp
 	type PairProbe, type Snapshots, type StageResult } from "./pair-stages.ts";
 import type { RequestMeta } from "./codex-payload.ts";
 
-export type PairProgress = { type: "prompt-idle"; step: PromptStep; arm: Arm; snapshots: Snapshots;
+export type PairProgress = { type: "prompt-idle"; seed: string; step: PromptStep; arm: Arm; snapshots: Snapshots;
 	promptCounts: Record<Arm, number>; sentAttempts: Record<Arm, number> };
 export type PairOptions = {
 	seed: string; firstArm: Arm; workload?: Workload; limits?: Partial<EvalLimits>; clock?: Clock;
 	createArm(options: { arm: Arm; requestGuard: (meta: RequestMeta) => void; clock: Clock }): Promise<EvalArm>;
+	onReady?(snapshots: Readonly<Record<Arm, ArmSnapshot>>): Promise<void>;
 	onProgress?(progress: PairProgress): Promise<void>;
 };
 export type PairResult = {
@@ -48,7 +49,7 @@ export async function runPair(options: PairOptions): Promise<PairResult> {
 				throw new Error("Arm error");
 			}
 			check();
-			await options.onProgress?.({ type: "prompt-idle", step, arm, snapshots: { ...snapshots },
+			await options.onProgress?.({ type: "prompt-idle", seed: workload.seed, step, arm, snapshots: { ...snapshots },
 				promptCounts: guard.promptCounts, sentAttempts: guard.sentAttempts });
 		}
 	};
@@ -86,6 +87,7 @@ export async function runPair(options: PairOptions): Promise<PairResult> {
 			await wait(pending);
 		}
 		if (snapshots.baseline!.metadataFingerprint !== snapshots.paging!.metadataFingerprint) throw new Error("Arm metadata mismatch");
+		await options.onReady?.(snapshots as Record<Arm, ArmSnapshot>);
 		for (const step of workload.seedSteps) await send(step);
 		while (!stageOpportunity("A", workload, snapshots) && !successfulCompactions(snapshots.baseline)) await work(12);
 		if (successfulCompactions(snapshots.baseline)) stages.A.reason = "baseline-compacted-before-stage-A";

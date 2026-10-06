@@ -8,6 +8,7 @@ import type { OriginIndex, RequestEvidence, RequestMeta } from "./codex-payload.
 import type { RecoveryResult } from "./evidence.ts";
 import { PiJournal, type CompactionEvent, type JournalEvent, type UsageLedgerEntry } from "./pi-journal.ts";
 import type { Arm, PromptStep } from "./workload.ts";
+import { PAGING_SETTINGS } from "./experiment-settings.ts";
 export type { UsageLedgerEntry } from "./pi-journal.ts";
 
 export type Clock = {
@@ -48,7 +49,7 @@ export type PiArmOptions = {
 	agentDir: string;
 	resourceDir: string;
 	eventSink?: (event: JournalEvent) => void;
-	requestGuard?: (meta: RequestMeta) => void;
+	requestGuard?: (meta: RequestMeta) => void | Promise<void>;
 	clock?: Clock;
 	createRuntime?: RuntimeFactory;
 };
@@ -68,7 +69,7 @@ export async function createPiArm(options: PiArmOptions): Promise<EvalArm> {
 	};
 	const factories: ExtensionFactory[] = [observer];
 	if (options.arm === "paging") factories.push(pi => contextPagingExtension(pi, {
-		globalSettings: { contextPaging: { enabled: true, tokenBudget: 128_000, trimToTokens: 80_000 } }, projectTrusted: false,
+		globalSettings: { contextPaging: { ...PAGING_SETTINGS } }, projectTrusted: false,
 	}));
 	const resourceLoader = new DefaultResourceLoader({ cwd, agentDir: resources, settingsManager,
 		noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,

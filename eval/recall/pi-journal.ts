@@ -11,6 +11,7 @@ export type UsageLedgerEntry = {
 	entryId: string;
 	kind: "assistant" | "explicit" | "compaction";
 	requestIds: readonly string[];
+	catalogPricesKnown: boolean;
 	sdkUsage: Usage | null;
 	observations: readonly ProviderUsageObservation[];
 };
@@ -19,7 +20,7 @@ export type JournalEvent = { type: string; eventIndex: number; promptId: string 
 export type JournalOptions = {
 	arm: Arm;
 	eventSink?: (event: JournalEvent) => void;
-	requestGuard?: (meta: RequestMeta) => void;
+	requestGuard?: (meta: RequestMeta) => void | Promise<void>;
 };
 function texts(content: unknown): string[] {
 	if (typeof content === "string") return [content];
@@ -107,7 +108,7 @@ export class PiJournal {
 				this.requests.push(evidence); this.emit("payload", { requestId: meta.requestId });
 				if (!evidence.complete || this.errors.some(error => error.code === "extension-error")) throw new Error("Payload observation incomplete");
 			},
-			beforeHttpAttempt: meta => { this.options.requestGuard?.(meta); this.emit("http-attempt", { requestId: meta.requestId }); },
+			beforeHttpAttempt: async meta => { await this.options.requestGuard?.(meta); this.emit("http-attempt", { requestId: meta.requestId }); },
 			onHttpAttemptEnd: (meta, status) => { this.emit("http-attempt-end", { requestId: meta.requestId, status }); },
 			onUsageObservation: (meta, observation) => {
 				this.usage.set(meta.requestId, observation); this.emit("usage-observation", { requestId: meta.requestId });
@@ -157,7 +158,10 @@ export class PiJournal {
 			if (!join) return [];
 			const sdkUsage = entry.type === "message" && entry.message.role === "assistant" ? entry.message.usage
 				: entry.type === "compaction" || entry.type === "usage" ? entry.usage ?? null : null;
-			return [{ entryId: entry.id, ...join, sdkUsage,
+			const prices = this.session.model?.cost;
+			const catalogPricesKnown = !!prices && [prices.input, prices.output, prices.cacheRead, prices.cacheWrite]
+				.every(price => typeof price === "number" && Number.isFinite(price) && price >= 0);
+			return [{ entryId: entry.id, ...join, sdkUsage, catalogPricesKnown,
 				observations: join.requestIds.map(id => this.usage.get(id) ?? unknownUsage(id)) }];
 		});
 	}

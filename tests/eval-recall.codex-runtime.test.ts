@@ -35,13 +35,13 @@ test("preflight resolves only the exact available model with native window and x
 	assert.ok(Object.isFrozen(prepared.metadata.cost));
 });
 
-for (const [name, models, configured] of [
-	["missing exact model", [], true],
-	["unavailable credentials", [model], false],
-	["unsupported xhigh", [{ ...model, thinkingLevelMap: { ...model.thinkingLevelMap, xhigh: null } }], true],
+for (const [name, models, configured, code] of [
+	["missing exact model", [], true, "EVAL_MODEL_UNAVAILABLE"],
+	["unavailable credentials", [model], false, "EVAL_CREDENTIALS_UNAVAILABLE"],
+	["unsupported xhigh", [{ ...model, thinkingLevelMap: { ...model.thinkingLevelMap, xhigh: null } }], true, "EVAL_XHIGH_UNAVAILABLE"],
 ] as const) test(`preflight refuses ${name} without substitution`, async () => {
 	const fixture = await fixtureRuntime(undefined, models as readonly Model<Api>[], configured);
-	await assert.rejects(prepareCodexRuntime("/unused", hooks().value, async () => fixture.runtime));
+	await assert.rejects(prepareCodexRuntime("/unused", hooks().value, async () => fixture.runtime), { code });
 	assert.equal(fixture.dispatches.length, 0);
 });
 
@@ -118,6 +118,17 @@ test("guards every actual retry dispatch without allocating another logical requ
 	assert.equal(fixture.dispatches.length, 2);
 	assert.deepEqual(h.events, ["payload", "guard", "status:500", "guard", "status:200"]);
 	assert.equal(h.observations.length, 1);
+});
+
+test("an asynchronous artifact or source guard blocks dispatch before provider fetch", async () => {
+	const h = hooks();
+	h.value.beforeHttpAttempt = async () => { await Promise.resolve(); throw new Error("guard blocked"); };
+	const fixture = await fixtureRuntime(() => ({ usage: measuredUsage }));
+	const prepared = await prepareCodexRuntime("/unused", h.value, async () => fixture.runtime);
+	const answer = await prepared.runtime.completeSimple(prepared.model, { messages: context.messages }, { maxRetries: 0 });
+	assert.equal(fixture.dispatches.length, 0);
+	assert.equal(answer.stopReason, "error");
+	assert.equal(h.observations.length, 0);
 });
 
 test("a stream without terminal response leaves measurement presence unknown", async () => {

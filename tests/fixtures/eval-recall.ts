@@ -10,7 +10,7 @@ export function evidenceFixture(overrides: Partial<RequestEvidence> = {}): Reque
 
 export type ArmScript = (step: PromptStep, snapshot: ArmSnapshot) => Partial<ArmSnapshot>;
 export function makeScriptedArm(options: {
-	arm: Arm; workload: Workload; beforeAttempt: (meta: RequestMeta) => void; order: string[]; script?: ArmScript;
+	arm: Arm; workload: Workload; beforeAttempt: (meta: RequestMeta) => void | Promise<void>; order: string[]; script?: ArmScript;
 	attempts?: (step: PromptStep) => number; onPrompt?: (step: PromptStep) => Promise<void>; onAbort?: () => void;
 }) {
 	const { arm, workload } = options;
@@ -28,7 +28,7 @@ export function makeScriptedArm(options: {
 			options.order.push(`${arm}:${step.id}`);
 			state = { ...state, promptCount: received.length };
 			for (let index = 0; index < (options.attempts?.(step) ?? 1); index++) {
-				options.beforeAttempt({ arm, promptId: step.id, requestId: `${arm}-${step.id}-${index}`,
+				await options.beforeAttempt({ arm, promptId: step.id, requestId: `${arm}-${step.id}-${index}`,
 					purpose: index ? "compaction" : "conversation" });
 			}
 			const compacted = state.compactions.some(event => event.success);

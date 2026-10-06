@@ -256,6 +256,8 @@ Run the performance benchmark:
 npm run bench
 ```
 
+See the [full-budget recall evaluation guide](docs/evals/full-budget-recall.md) for the development-only pilot and batch harness.
+
 ## Upgrade and removal
 
 Upgrade installed packages:

@@ -29,6 +29,7 @@
 - Keep answer keys and artifacts outside both model contexts. No LLM judge, file tool, shell tool, or alternate recovery tool is allowed.
 - Default limits: 64 user prompts per arm, 12 provider requests per prompt, 256 provider requests per arm, 120 minutes per pair.
 - Use one separate valid pilot before a batch of three matched pairs. Alternate the first arm between pairs.
+- Require the `clean-checkout-v1` policy before live preflight. Keep the full recorded Git revision and checkout unchanged throughout each run.
 - Store results under `.pi/evals/full-budget-recall/<run-id>/`. This directory is already ignored.
 - Label costs as catalog estimates. Unknown usage is not zero, and Codex estimates are not invoices or quota guarantees.
 - Fake-provider and pure-unit fixtures are not effectiveness evidence. No small-budget live runs are part of this plan.
@@ -41,6 +42,9 @@
 3. HTTP retries and compaction calls can bypass a simple request counter. Count actual attempts before dispatch in Tasks 4 and 5.
 4. Model metadata changes or stale pilot artifacts must not authorize a mismatched batch. Pin this in Tasks 4 and 6.
 5. Baseline compaction can occur during the first probe group. Preserve the actual timing and mark stage A inconclusive in Task 5.
+6. Summary origins must use canonical SDK conversion, including the wrapper and outgoing role. Pin this in Tasks 3 and 4.
+7. SDK usage normalization erases missing-field presence. Capture that presence at the transport boundary in Task 4 and aggregate it in Task 6.
+8. Uncommitted source changes at unchanged HEAD must block live preflight and stale pilot eligibility. Pin this in Task 6.
 
 ---
 
@@ -57,9 +61,10 @@
 | `eval/recall/codex-runtime.ts` | Exact-model preflight and observed SSE provider dispatch |
 | `eval/recall/pi-arm.ts` | One real Pi session, its events, snapshots, and cleanup |
 | `eval/recall/pair.ts` | Shared prompt sequence, stage gates, limits, and pair outcomes |
-| `eval/recall/usage.ts` | Usage ledger and complete or unknown totals |
+| `eval/recall/usage.ts` | Complete or unknown totals from the typed usage ledger |
 | `eval/recall/report.ts` | Manifests, eligibility fingerprints, private artifacts, and reports |
 | `eval/recall/cli.ts` | Argument parsing and pilot or batch orchestration |
+| `eval/recall/source-integrity.ts` | Clean-checkout verification at a fixed Git revision |
 | `scripts/recall-eval.ts` | Thin executable entry point |
 | `tests/fixtures/eval-recall.ts` | Pure fixtures and a scripted arm for controller tests |
 | `tests/fixtures/eval-recall-provider.ts` | A deterministic native provider for real-SDK tests |
@@ -241,7 +246,8 @@ Run: `git commit -m "test(eval): add strict historical answer scoring"`
 - Consumes: Task 1 facts and probes, plus Task 2 `ProbeScore`.
 - Produces: `decodeCodexPayload(payload: unknown, meta: RequestMeta, origins: OriginIndex): RequestEvidence`.
 - `RequestMeta` contains `requestId`, `promptId`, `arm`, and `purpose: "conversation" | "compaction"`.
-- `OriginIndex` contains known original prompt text by prompt ID and compaction summary text by entry ID.
+- `OriginIndex` contains canonical SDK-converted roles and text blocks, tagged with original prompt IDs or compaction entry IDs.
+- The Task 4 session runner owns origin construction with the pinned SDK's `convertToLlm()`. The payload decoder consumes that index without wrapping raw summaries.
 - `RequestEvidence` contains the metadata, `complete`, optional `error`, readable blocks, and opaque-item counts and hashes.
 - Each readable block records text, role, and an optional original prompt ID or compaction entry ID.
 - Produces: `matchFact(fact: FactVersion, texts: readonly string[]): "match" | "none" | "ambiguous"`.
@@ -257,6 +263,10 @@ Run: `git commit -m "test(eval): add strict historical answer scoring"`
 - [ ] **Step 1: Write failing protocol and evidence tests.**
 
 Test original source retention, summary retention, resident assistant copies, readable absence, and unknown probes.
+Build summary fixtures through the real SDK's `convertToLlm()`, then decode their provider payloads.
+Require `resident-summary` for a retained answer inside the SDK-wrapped `user` message, with the correct compaction entry ID.
+A bare stored summary or a wrong role must not match that origin.
+Test ambiguous converted origins without choosing one arbitrarily.
 Test correct recovery through each registered history tool, including an answer in a search reference.
 An error result, a bare tool call, or a result after the final answer must not establish successful recovery.
 Wrong final answers remain wrong even after correct recovery.
@@ -290,7 +300,8 @@ A tool result that quotes an entire seed packet must not become a resident origi
 - [ ] **Step 4: Implement `decodeCodexPayload()`.** Decode Codex `instructions`, input messages, function calls, function outputs, readable reasoning summaries, and tool declarations.
 
 Validate the selected API's known shapes, `store: false`, and absence of `previous_response_id`.
-Use exact source text and message roles for origin matching, with conservative handling of ambiguous matches.
+Match exact roles and text blocks from the SDK-converted origin index, with conservative handling of ambiguous matches.
+Do not match raw compaction summary text or duplicate the SDK's prefixes, tags, or role conversion in the decoder.
 An opaque item contributes a count and SHA-256 digest, never readable answer evidence.
 Do not serialize arbitrary unknown payload fields into artifacts.
 
@@ -337,11 +348,17 @@ Run: `git commit -m "test(eval): trace readable evidence without opaque-state cl
 - `SafeModelMetadata` is an explicit projection of `provider`, `id`, `api`, `contextWindow`, `maxTokens`, `cost`, `reasoning`, and `thinkingLevelMap`.
 - Produces: `observeProvider(base: Provider, hooks: RequestHooks): Provider` for per-runtime registration.
 - `RequestHooks` has `allocateMeta(): RequestMeta`, `onPayload(meta: RequestMeta, payload: unknown, context: TranscriptContext): Promise<void>`, `beforeHttpAttempt(meta: RequestMeta): void`, and `onHttpAttemptEnd(meta: RequestMeta, status: number | null): void`.
+- It also has `onUsageObservation(meta: RequestMeta, observation: ProviderUsageObservation): void` for incoming usage before SDK normalization.
+- `ProviderUsageObservation` contains `requestId`, `usagePresent`, optional `error`, and nullable `inputTokens`, `outputTokens`, `cachedTokens`, and `cacheWriteTokens` from allowlisted raw usage fields.
+- A missing field is `null`. An explicit numeric zero is `0`. Invalid numeric fields produce an observation error, not measured zero.
+- `UsageLedgerEntry` contains `entryId`, `kind`, `requestIds`, nullable normalized `sdkUsage`, and all contributing `ProviderUsageObservation` records.
+- `kind` distinguishes assistant messages, explicit usage entries, and native compaction entries. SDK normalization and cost calculation remain SDK-owned.
 - Produces: `createPiArm(options: PiArmOptions): Promise<EvalArm>`.
 - `PiArmOptions` contains `arm`, the real credential `agentDir`, a private temporary resource directory, event sink, request guard, clock, and an optional injected `RuntimeFactory`.
 - `createPiArm()` owns its request scope and calls `prepareCodexRuntime()` before session creation.
 - `EvalArm` has `runPrompt(step: PromptStep): Promise<ArmSnapshot>`, `snapshot(): ArmSnapshot`, `abort(): Promise<void>`, and `dispose(): void`.
-- `ArmSnapshot` contains prompt count, request evidence, completed recovery results, final answer text and event index, source origins, compactions, entries, usage, latency, errors, and safe model metadata.
+- `ArmSnapshot` contains prompt count, request evidence, completed recovery results, final answer text and event index, source origins, compactions, and entries.
+- It also contains `usageLedger: readonly UsageLedgerEntry[]`, latency, errors, and safe model metadata.
 - `Clock` supplies `nowMs(): number`, `setTimeout(callback: () => void, milliseconds: number): unknown`, and `clearTimeout(handle: unknown): void`.
 - Production uses a monotonic clock and real timers. Tests inject a fake clock with controllable timers.
 - The provider fixture produces `makeFixtureProvider(script: FixtureScript): Provider` and an observable dispatch log. It never reads real credentials or uses a network.
@@ -357,6 +374,7 @@ Version validation uses direct package inspection, not a test that restates depe
 The baseline must expose no tools, and the treatment must expose exactly `PAGING_TOOL_NAMES` from `src/history.ts`.
 Both must exclude file tools, shell tools, skills, and project instructions.
 A successful fake-native compaction must retain normal summaries and the default recent-history policy.
+Require its observed provider message to match the SDK-converted origin and retain the compaction entry ID.
 The treatment must cancel threshold and overflow compaction but not claim those cancellations as successful compactions.
 
 - [ ] **Step 3: Add transport and cleanup tests.** Exercise ordinary prompts, a tool follow-up, native compaction, and a retried HTTP dispatch.
@@ -367,6 +385,14 @@ A request guard must run before each HTTP attempt, including a retry.
 No credentials or encrypted signatures can enter the recorded artifacts.
 A failed second-arm startup must permit cleanup of the first arm.
 Waiting only for the first `agent_end` must not complete a scripted tool continuation.
+
+Inject fake HTTP SSE responses through the real pinned Codex adapter, not a provider that fabricates normalized usage.
+Omit the entire usage object, then omit individual input, output, and cache fields in separate cases.
+Compare those cases with explicit numeric zeros in the same fields.
+The SDK can persist identical zeros, but the transport observations and resulting ledger must retain the difference.
+Cover ordinary and native-compaction requests, including a compaction entry that combines two requests.
+Retry or duplicate observations must not count one measurement twice.
+A missing terminal response or usage observation must leave measurement presence unknown.
 
 - [ ] **Step 4: Run `node --test --experimental-strip-types tests/eval-recall.pi-arm.test.ts`.** Expected: missing adapter modules or functions.
 
@@ -382,6 +408,12 @@ Compose `onPayload` after any caller callback, observe its effective payload wit
 Wrap the request's existing fetch function or `globalThis.fetch` to count each actual model HTTP attempt before dispatch.
 Do not count OAuth or catalog traffic as model inference.
 Preserve abort signals and do not read or export request headers.
+
+Observe incoming terminal SSE usage before forwarding it to the native adapter's normalization path.
+Use a pass-through observer that preserves response bytes, chunk order, backpressure, cancellation, and errors.
+Capture only the allowlisted usage projection and its field presence, keyed by request ID.
+Do not retain or export raw response bodies, encrypted reasoning, or headers.
+Do not infer measurement presence from the SDK's normalized zeros.
 
 - [ ] **Step 6: Implement `createPiArm()` with the real SDK.** Use independent `SessionManager.inMemory()` instances and in-memory settings.
 
@@ -402,6 +434,11 @@ Bind extensions explicitly before the first prompt and record loading errors thr
 Track the current prompt and conversation or compaction purpose for every request.
 Record successful compaction events separately from canceled attempts.
 Correlate tool calls and results by tool-call ID and request order.
+Build source origins by converting the corresponding SDK context messages with `convertToLlm()` and retaining their host-side IDs.
+Keep raw summaries in session entries, but use only converted roles and text blocks for payload attribution.
+Join transport usage observations to persisted assistant, explicit usage, and compaction entries in `usageLedger`.
+For a combined compaction entry, retain every contributing request's presence metadata.
+Missing or ambiguous joins remain unknown rather than assuming that normalized zeros were measured.
 Await `session.waitForIdle()` after prompting, then capture the final answer and snapshot.
 An error keeps partial evidence but does not silently advance to another prompt.
 Guard startup, prompting, abort, and disposal with cleanup paths.
@@ -505,6 +542,7 @@ Run: `git commit -m "test(eval): gate paired recall stages and enforce limits"`
 - Create: `eval/recall/usage.ts`
 - Create: `eval/recall/report.ts`
 - Create: `eval/recall/cli.ts`
+- Create: `eval/recall/source-integrity.ts`
 - Create: `scripts/recall-eval.ts`
 - Create: `tests/eval-recall.report.test.ts`
 - Create: `tests/eval-recall.cli.test.ts`
@@ -514,28 +552,42 @@ Run: `git commit -m "test(eval): gate paired recall stages and enforce limits"`
 
 **Interfaces:**
 - Consumes: Task 5 `PairResult`, Task 4 snapshots, and Task 3 safe exports.
-- Produces: `aggregateUsage(entries: readonly SessionEntry[]): UsageSummary`.
+- Consumes: Task 4 `UsageLedgerEntry`, including captured measurement presence for every contributing request.
+- Produces: `aggregateUsage(ledger: readonly UsageLedgerEntry[]): UsageSummary`.
 - `UsageSummary` contains nullable input, output, cache-read, cache-write, and estimated cost totals, plus compaction subtotals and missing-field records.
+- Missing-field records identify the persisted entry, contributing request, and missing component or observation. Normalized SDK usage alone cannot establish presence.
+- `source-integrity.ts` produces `assertCleanSource(repoRoot: string, expectedRevision?: string): CleanSourceSnapshot`.
+- `CleanSourceSnapshot` contains the full `sourceRevision` and `sourceIntegrity: "clean-checkout-v1"`. A dirty checkout, missing Git evidence, or revision mismatch throws before live preflight.
+- The check includes staged changes, unstaged changes, and non-ignored untracked files. Live eval and extension modules must be tracked in that checkout.
 - Produces: `buildManifest(input: ManifestInput): RunManifest` and `experimentFingerprint(manifest: RunManifest): string`.
-- The fingerprint includes source revision, SDK and Node.js versions, model metadata, thinking, baseline and paging settings, transport, limits, and workload version.
+- The fingerprint includes source revision, source-integrity policy, SDK and Node.js versions, model metadata, thinking, baseline and paging settings, transport, limits, and workload version.
 - It excludes run IDs, timestamps, seeds, pair order, and measured results.
 - Produces: `isEligiblePilot(pilot: RunManifest, result: PairResult, next: RunManifest): { eligible: boolean; reason: string | null }`.
 - Produces: `createArtifactWriter(directory: string, manifest: RunManifest): Promise<ArtifactWriter>`.
 - `ArtifactWriter` exposes `appendProgress(progress: PairProgress): Promise<void>` and `finish(result: PairResult): Promise<void>`.
+- After successful session cleanup, source verification, and artifact writes, `complete(): Promise<void>` writes a run-bound `completion.json`. Batch startup requires this record so stale complete summaries cannot authorize a batch after a final write failure.
 - Produces: `renderReport(manifest: RunManifest, pairs: readonly PairResult[]): string`.
 - Produces: `parseEvalArgs(argv: readonly string[]): EvalCliOptions` and `runEval(options: EvalCliOptions, dependencies: EvalCliDependencies): Promise<number>`.
 - `EvalCliOptions` contains `mode: "dry-run" | "pilot" | "batch"`, `seed`, `outputDirectory`, `pairs`, optional `pilotManifestPath`, and `limits`.
-- CLI dependencies inject clocks, runtime factories, arm factories, artifact I/O, and console output for provider-free tests.
-- `RunManifest` names its fields `schemaVersion`, `runId`, `mode`, `sourceRevision`, `sdkVersion`, `nodeVersion`, `modelMetadata`, `thinking`, `baseline`, `paging`, `transport`, `limits`, `workloadVersion`, `seeds`, `firstArms`, and `experimentHash`.
+- CLI dependencies inject source inspection, clocks, runtime factories, arm factories, artifact I/O, and console output for provider-free tests.
+- `RunManifest` names its fields `schemaVersion`, `runId`, `mode`, `sourceRevision`, `sourceIntegrity`, `sdkVersion`, `nodeVersion`, `modelMetadata`, `thinking`, `baseline`, `paging`, `transport`, `limits`, `workloadVersion`, `seeds`, `firstArms`, and `experimentHash`.
+- `sourceIntegrity` is `"clean-checkout-v1"` only after source verification. It is `null` for unverified or failed source checks. Pilot eligibility requires the verified policy in both manifests.
+- `sourceRevision` is the full checked Git commit ID, not a branch name. It can be `null` only in an incomplete preflight artifact with no verified Git evidence.
+- A loaded pilot without verified source-integrity evidence or a full source revision must fail eligibility.
 - `modelMetadata` can be `null` only for an incomplete preflight artifact. It is required for pilot eligibility.
 - The workload version starts as `incident-v1`. The manifest schema version starts as `1`.
 
 - [ ] **Step 1: Write failing usage and report tests.**
 
-Sum usage once per persisted entry ID across assistant messages, explicit usage entries, and native compaction entries.
+Sum ledger usage once per persisted entry ID across assistant messages, explicit usage entries, and native compaction entries.
 A compaction subtotal of 100 tokens inside a 1,000-token session total must remain a subtotal, not produce 1,100 tokens.
 Duplicate observations of one compaction entry must not count twice.
-A missing usage component must yield an unknown total for that component, not zero.
+Use ledger fixtures with measured zeros, missing raw fields, and missing transport observations.
+A missing component in any contributing request must make that component's total unknown, not zero.
+Input requires reported input tokens and both cache components because the SDK subtracts those components from provider input tokens.
+Output, cache-read, and cache-write totals each require their corresponding provider field.
+Estimated cost requires complete token components and catalog prices.
+Keep the real-adapter omitted-field versus explicit-zero regression in Task 4. Fabricated `undefined` SDK fields do not replace that test.
 
 Keep per-stage known and unknown accuracy, category and revised-decision accuracy, and qualified denominators.
 Keep individual pairs and paired differences alongside aggregate summaries.
@@ -547,6 +599,11 @@ Reports must retain opaque-reasoning caveats and label costs as catalog estimate
 A default invocation or `--dry-run` must never resolve credentials, create sessions, or dispatch a request.
 A failed or mismatched pilot must block batch startup before any model request.
 A changed native window, source revision, thinking level, or settings fingerprint must invalidate pilot eligibility.
+Use a temporary Git repository to test source integrity through the real Git inspection path.
+After a valid clean pilot, change an eval file without changing HEAD. Batch startup must fail before live imports, credentials, or sessions.
+Also cover staged edits, dirty extension or transport files, non-ignored untracked source files, missing policy evidence, and changed clean revisions.
+Ignored artifact files must not invalidate a clean source snapshot.
+A source change during a run must block the next HTTP attempt and make the pilot ineligible at finalization.
 Use temporary artifact directories and prove that exported files contain no secret or encrypted-signature sentinels.
 Artifact errors and provider errors must retain available partial evidence and close sessions.
 
@@ -554,13 +611,19 @@ Artifact errors and provider errors must retain available partial evidence and c
 
 Run: `node --test --experimental-strip-types tests/eval-recall.report.test.ts tests/eval-recall.cli.test.ts`
 
-- [ ] **Step 4: Implement usage aggregation and eligibility.** Use the raw persisted usage ledger, deduplicated by entry ID.
+- [ ] **Step 4: Implement usage aggregation, source integrity, and eligibility.** Consume the typed usage ledger, deduplicated by entry ID.
 
 Use `session.getSessionStats()` as a recorded cross-check, not a second source to add to the ledger.
+Use normalized SDK values only when the transport observations establish presence for every contributing request.
+Do not infer presence from persisted zeros or recompute the SDK's usage and cost normalization.
 Track missing fields explicitly, and show compaction usage separately without adding it twice.
-Treat complete pair structure and safe evidence as pilot eligibility, not perfect model accuracy.
+
+Implement `assertCleanSource()` with Git status and full HEAD inspection in the checkout that contains the entry point.
+Do not inspect either session's private temporary `cwd` as the source checkout.
+Reject dirty or untracked live sources before credential resolution, runtime creation, or model dispatch.
+Treat complete pair structure, safe evidence, and matching verified source integrity as pilot eligibility, not perfect model accuracy.
 A complete pilot with wrong answers can authorize a batch.
-A pilot with missing stages, contamination, unsupported traces, or mismatched fingerprints cannot authorize it.
+A pilot with missing stages, contamination, unsupported traces, unverified sources, or mismatched fingerprints cannot authorize it.
 
 - [ ] **Step 5: Implement manifests and private artifacts.** Create the run directory with mode `0700` and files with mode `0600`.
 
@@ -569,6 +632,7 @@ Write a manifest, shared prompts with a hash, safe per-arm transcripts and trace
 Persist progress after each shared prompt and serialize writes before finalization.
 Use temporary files and rename for final summaries.
 Artifact write errors stop further model work.
+Keep custom artifact directories outside the checkout or in ignored paths, so artifact writes do not dirty verified sources.
 
 - [ ] **Step 6: Implement argument parsing and orchestration.** Use these commands and fixed live model settings.
 
@@ -584,16 +648,27 @@ Accept `--seed`, `--output-dir`, `--pairs`, and positive-integer safety-limit ar
 `--pairs` applies only to batch mode and supports later repetitions without changing the model or budgets.
 Reject conflicting modes, unknown flags, malformed numbers, and model or budget override flags.
 
+For live modes, capture a clean source snapshot before loading workload, transport, or extension modules.
+Load live dependencies only after that check. The source verifier itself has no live-module imports.
+Pass the checked revision and policy to manifest construction.
+Recheck against that revision before each pair, each model HTTP attempt including retries, and successful finalization.
+If a source check fails, stop further requests.
+Clear verified policy evidence.
+Retain partial artifacts with the source error.
+Never authorize a batch solely because a dirty checkout still reports the pilot's HEAD.
+
 Use these exit codes: `0` for dry run or structurally complete results, `2` for arguments or infrastructure errors, and `3` for inconclusive stages or safety limits.
 A wrong model answer does not require a nonzero process exit.
 An authenticated unavailable model is an infrastructure error, not a scored wrong answer.
 
 - [ ] **Step 7: Add the entry point and documentation.** Add `eval:recall` as `node --experimental-strip-types scripts/recall-eval.ts`.
 
-Keep the script as a thin CLI import with an exit code.
+Keep the script as a thin bootstrap with an exit code and no eager live-module imports.
+Use the source verifier before dynamic live imports, while keeping dry run provider-free.
 Keep eval sources and result files outside the package's published `files` list.
 Do not change dependencies or the lockfile.
 The guide must explain authentication, the two stages, SSE tracing, opaque reasoning, safety limits, costs, artifacts, and pilot eligibility.
+It must explain clean-checkout preflight, committing harness changes before a new pilot, and keeping sources unchanged during live runs.
 Add one README link to that guide.
 
 - [ ] **Step 8: Run all tests, typecheck, dry run, and package verification.**
@@ -607,7 +682,7 @@ Use direct command verification for package scripts and documentation instead of
 
 - [ ] **Step 9: Commit the usable harness.**
 
-Run: `git add eval/recall/usage.ts eval/recall/report.ts eval/recall/cli.ts scripts/recall-eval.ts tests/eval-recall.report.test.ts tests/eval-recall.cli.test.ts docs/evals/full-budget-recall.md package.json README.md`
+Run: `git add eval/recall/usage.ts eval/recall/report.ts eval/recall/cli.ts eval/recall/source-integrity.ts scripts/recall-eval.ts tests/eval-recall.report.test.ts tests/eval-recall.cli.test.ts docs/evals/full-budget-recall.md package.json README.md`
 
 Run: `git commit -m "feat(eval): add full-budget recall runner and reports"`
 
@@ -630,6 +705,8 @@ Run: `npm run check`
 Run: `npm run eval:recall -- --dry-run`
 
 Expected: all existing and new tests pass, the packed artifact check passes, and the dry run makes no live request.
+Commit all harness changes before live preflight. The CLI must accept only a clean checkout at that full revision.
+Keep source files unchanged during the pilot and batch.
 
 - [ ] **Step 2: Run exact-model preflight and the pilot through the CLI.**
 
@@ -638,13 +715,15 @@ Run: `npm run eval:recall -- --pilot --seed pilot-v1`
 Do not substitute another model after an authentication, catalog, or provider error.
 If the pilot fails a stage or trace requirement, retain the report and stop before the batch.
 Diagnose the observed cause instead of lowering the paging budget.
-After a harness fix, rerun automated verification and a fresh pilot at the new source revision.
+After a harness fix, rerun automated verification and commit the fix.
+Run a fresh pilot from the clean new source revision.
 
 - [ ] **Step 3: Review pilot evidence.** Require at least 24 shared prompts, four qualified stage A probes, and successful native baseline compaction before stage B.
 
 Require source exclusion, safe request traces, independent stage targets, effective `xhigh`, and 128,000/80,000 paging settings.
 Check correctness scores without requiring either arm to win.
-Check encrypted-reasoning disclosures and usage completeness.
+Check encrypted-reasoning disclosures, transport measurement presence, and usage completeness.
+Require verified `clean-checkout-v1` evidence and the same source revision for batch startup.
 The pilot result must remain separate from batch aggregate scores.
 
 - [ ] **Step 4: Run the three-pair batch using the eligible pilot artifact.**
@@ -682,15 +761,17 @@ Do not push or merge without the user's choice.
 | Seeded substantive packets and fact revisions | Task 1 generator tests and pilot packet review |
 | Exact known and unknown answers | Task 2 strict parser and scoring tests |
 | Initial readable visibility and opaque-state limits | Task 3 protocol and evidence tests |
+| SDK-wrapped summary attribution with its outgoing role | Tasks 3 and 4 canonical-conversion and real-SDK tests |
 | Safe host-only answer keys and artifacts | Tasks 1, 3, 4, and 6 isolation and export tests |
 | Actual extension, native baseline, exact model, and SSE | Task 4 real-SDK tests and Task 7 preflight |
 | Identical prompts, both stages, and minimum count | Task 5 controller tests and Task 7 pilot |
 | Limits, errors, retries, and complete cleanup | Tasks 4–6 guarded dispatch and failure tests |
-| Usage without duplicate compaction costs | Task 6 ledger tests and live cross-check |
+| Usage presence before normalization and no duplicate compaction costs | Task 4 real-adapter SSE tests, Task 6 typed-ledger tests, and live cross-check |
 | Pilot before three different batch seeds | Task 6 eligibility tests and Task 7 live evidence |
+| Clean executed sources and rejection of dirty edits at unchanged HEAD | Task 6 real-Git eligibility tests and Task 7 clean-source gates |
 | No production changes or package growth | Task 6 package smoke check and Task 7 diff review |
 
-The plan pins all five Review Focus cases to owning tests.
+The plan pins all eight Review Focus cases to owning tests.
 The public interfaces use the same names across task boundaries.
 Static documentation and script settings use direct verification instead of maintenance-only tests.
 

@@ -245,6 +245,12 @@ These events identify source-message removal, successful compaction, recovery to
 The original prompts remain available to the host for source-ID matching.
 They are not available as an extra model tool.
 
+The session runner builds the origin index from the pinned SDK's `convertToLlm()` output.
+Each origin retains its original prompt ID or compaction entry ID alongside the converted role and text blocks.
+Compaction summaries therefore match their outgoing `user` role and SDK wrapper, not the raw stored summary text.
+The payload parser does not copy the SDK's wrapping rules.
+If converted origins match ambiguously, the analyzer returns `unclassified`.
+
 Each known probe receives one initial visibility label:
 
 | Label | Evidence |
@@ -331,7 +337,7 @@ The host writes these artifacts, but the model cannot read them.
 
 Each run contains:
 
-- A manifest with versions, source revision, model metadata, thinking level, settings, seeds, and safety limits.
+- A manifest with versions, source revision, source-integrity policy, model metadata, thinking level, settings, seeds, and safety limits.
 - The exact prompt sequence and a hash of that sequence.
 - Separate session transcripts and request traces for both arms.
 - Compaction and recovery events.
@@ -353,6 +359,21 @@ The report includes per-arm and paired measurements:
 Codex subscription use is not necessarily direct API billing.
 The report labels monetary values as catalog estimates, not invoices or quota guarantees.
 A missing cost or usage field is unknown, not zero.
+The pinned SDK replaces omitted provider token fields with zero before persistence.
+The transport observer therefore captures field presence from incoming terminal SSE responses before the SDK normalizes usage.
+It records only allowlisted numeric usage fields, not raw response bodies or private values.
+An omitted field remains missing, while an explicit numeric zero remains measured zero.
+
+The session runner joins these observations to persisted usage-bearing entries in a typed usage ledger.
+A compaction entry can combine several requests, so its ledger record retains every contributing request's measurement presence.
+Missing observations or components make the affected totals unknown.
+Input totals require all components of the SDK's input calculation to be present.
+Cost estimates require complete usage components and catalog prices.
+The report uses normalized SDK values only where the captured presence supports them.
+
+The ledger counts each persisted usage-bearing entry once.
+Compaction usage remains a subtotal, not a second addition to the session total.
+The session statistics remain a cross-check, not another source to sum.
 Cache-sensitive latency and cost comparisons remain descriptive.
 
 ## Execution and interpretation
@@ -360,6 +381,23 @@ Cache-sensitive latency and cost comparisons remain descriptive.
 The pilot runs one matched pair with a recorded seed.
 It checks stage completion, payload tracing, fact isolation, answer parsing, and cleanup.
 The pilot is not part of the three-pair batch score.
+
+Live runs use the `clean-checkout-v1` source-integrity policy.
+Before live preflight, the CLI requires a clean checkout and records its full Git commit ID.
+The check rejects staged changes, unstaged changes, and non-ignored untracked files.
+The eval and extension modules must be tracked files from that checkout.
+The entry point performs this check before loading the live eval modules, resolving credentials, or creating sessions.
+
+The checkout must remain unchanged during the run.
+The CLI rechecks cleanliness and the recorded commit before each pair, each model HTTP attempt, and successful finalization.
+A failed source check stops further requests, preserves partial artifacts, and prevents pilot eligibility.
+Custom artifact directories must be outside the checkout or ignored by Git.
+
+The experiment fingerprint includes the source revision and source-integrity policy with the existing experiment settings.
+Batch startup requires an eligible pilot with the same fingerprint and verified source integrity.
+Missing source-integrity evidence cannot authorize a batch.
+An uncommitted eval edit at unchanged HEAD must fail before any live preflight or model request.
+A committed harness change requires a fresh pilot at the new revision.
 
 The batch runs three matched pairs with different fact seeds.
 The first-arm order alternates between pairs.
@@ -375,13 +413,15 @@ The implementation includes automated tests for reusable behavior:
 
 - Seeded packets, fact revisions, and disjoint probe groups.
 - Exact answer parsing, unknown answers, and superseded answers.
-- Source, summary, resident-copy, plaintext-absent, and ambiguous visibility.
+- Source, SDK-wrapped summary with its outgoing role, resident-copy, plaintext-absent, and ambiguous visibility.
 - Opaque reasoning flags and safe artifact exports.
 - Full-payload SSE transport in both ordinary and compaction requests.
 - Recovery evidence across initial and follow-up requests.
 - Stage control, shared prompt order, minimum prompt count, and safety limits.
 - Session cleanup and partial reports after errors.
-- Usage aggregation without duplicate compaction costs.
+- Real-adapter handling of omitted usage fields versus explicit zero, including compaction requests.
+- Usage aggregation with measurement presence and without duplicate compaction costs.
+- Pilot rejection for dirty sources at unchanged HEAD, changed revisions, and missing source-integrity evidence.
 
 A deterministic fake provider supports harness tests without paid model calls.
 A provider-free dry run shows the workload, settings, and expected artifacts.
@@ -403,7 +443,8 @@ The harness is ready for use when these conditions hold:
 7. No model tool exposes answer keys, fixture files, or host artifacts.
 8. All limits, incomplete stages, errors, and unknown measurements appear in the report.
 9. Automated harness tests and the existing paging tests pass.
-10. One valid pilot precedes the separate three-pair batch.
+10. One valid pilot precedes the separate three-pair batch at the same verified clean source revision.
+11. Summary origins use canonical SDK conversion, and unknown usage survives provider normalization through transport-level presence records.
 
 An inconclusive live pair can prove that failure reporting works.
 It cannot satisfy the live-stage acceptance criterion or support an effectiveness conclusion.
