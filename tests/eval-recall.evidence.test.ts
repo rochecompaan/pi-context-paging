@@ -181,6 +181,15 @@ test("safe exports allowlist model metadata and structured errors", () => {
 	assert.ok(!JSON.stringify(safe).includes("SECRET"));
 });
 
+test("safe model metadata retains price tiers and all known reasoning levels", () => {
+	const safe = sanitizeArtifact({ modelMetadata: { cost: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0,
+		tiers: [{ inputTokensAbove: 100, input: 3, output: 4, cacheRead: 0, cacheWrite: 0, privateNote: "SECRET" }] },
+		thinkingLevelMap: { xhigh: "xhigh", max: "max" } } });
+	assert.deepEqual(safe, { modelMetadata: { cost: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0,
+		tiers: [{ inputTokensAbove: 100, input: 3, output: 4, cacheRead: 0, cacheWrite: 0 }] },
+		thinkingLevelMap: { xhigh: "xhigh", max: "max" } } });
+});
+
 test("safe exports drop private structured fields recursively without changing frozen input", () => {
 	const live = Object.freeze({
 		text: "useful plaintext", opaque: Object.freeze({ count: 1, hashes: Object.freeze(["hash"]) }),

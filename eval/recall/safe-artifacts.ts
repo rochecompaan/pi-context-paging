@@ -5,8 +5,9 @@ const privateFields = new Set([
 	"environment", "env", "encryptedcontent", "thinkingsignature", "signature", "secret", "password",
 ]);
 const modelFields = new Set(["provider", "id", "api", "contextWindow", "maxTokens", "cost", "reasoning", "thinkingLevelMap"]);
-const costFields = new Set(["input", "output", "cacheRead", "cacheWrite", "total"]);
-const thinkingFields = new Set(["off", "minimal", "low", "medium", "high", "xhigh"]);
+const costFields = new Set(["input", "output", "cacheRead", "cacheWrite", "total", "tiers"]);
+const tierFields = new Set(["input", "output", "cacheRead", "cacheWrite", "inputTokensAbove"]);
+const thinkingFields = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
 const errorNames = new Set(["Error", "TypeError", "RangeError", "SyntaxError", "AbortError", "TimeoutError", "AggregateError"]);
 
 export function safeError(error: unknown): { name: string; code?: string } {
@@ -29,7 +30,7 @@ export function sanitizeArtifact(value: unknown): unknown {
 		if (Array.isArray(current)) result = current.map(item => copy(item, field));
 		else {
 			const allowed = field === "modelMetadata" ? modelFields : field === "cost" ? costFields
-				: field === "thinkingLevelMap" ? thinkingFields : null;
+				: field === "tiers" ? tierFields : field === "thinkingLevelMap" ? thinkingFields : null;
 			result = Object.fromEntries(Object.entries(current).filter(([key]) =>
 				!privateFields.has(key.toLowerCase().replace(/[-_]/g, "")) && (!allowed || allowed.has(key)))
 				.map(([key, item]) => [key, copy(item, key)]));
