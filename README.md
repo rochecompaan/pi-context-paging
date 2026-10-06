@@ -74,13 +74,13 @@ The model decides when to search.
 From npm:
 
 ```sh
-pi install npm:@rochecompaan/pi-context-paging@0.3.3
+pi install npm:@rochecompaan/pi-context-paging@0.3.5
 ```
 
 From the GitHub release tag:
 
 ```sh
-pi install git:github.com/rochecompaan/pi-context-paging@v0.3.3
+pi install git:github.com/rochecompaan/pi-context-paging@v0.3.5
 ```
 
 After installation, restart Pi.
@@ -296,6 +296,14 @@ A successful manual compaction resets the cut point.
 
 Read [the architecture document](docs/architecture.md) for module and lifecycle details.
 
+## Changes in 0.3.5
+
+- Paging removes the calibrated token cost of consumed recovery results when it removes those results from a request.
+- Positive provider undercount uses separate resident and measured-message estimates instead of one permanent offset.
+- Restored history, transient instructions, and paging notices keep their local estimates.
+- The token budget, resident checks, active request checks, and newest tool exchange protection stay unchanged.
+- Stored session history stays unchanged.
+
 ## Changes in 0.3.3
 
 - Recovery tools exclude assistant thinking, redacted thinking payloads, and provider signatures from search, previews, loads, and output pages.
@@ -387,7 +395,7 @@ pi update --extensions
 Remove the package:
 
 ```sh
-pi remove npm:@rochecompaan/pi-context-paging@0.3.3
+pi remove npm:@rochecompaan/pi-context-paging@0.3.5
 ```
 
 ## License

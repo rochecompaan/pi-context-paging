@@ -127,9 +127,17 @@ It subtracts the full persistent tail from Pi's status total, including system u
 Resident prompt and tool schemas contribute once. Weak caches reuse message fingerprints and estimates.
 When no valid response anchor exists, selection uses the heuristic fallback.
 Calibration uses the original incoming snapshot, before any remembered cut.
-Omitted interrupted exchanges and evicted messages reduce the estimate without losing that snapshot's provider offset.
+`context-calibration.ts` separates positive undercount into resident overhead and costs assigned to measured persistent messages.
+A single provider total cannot identify the fixed overhead exactly. The first observation allocates a proportional share to resident input.
+Later observations can lower this overhead estimate. A larger total does not raise the fixed overhead floor.
+The remaining undercount scales the measured persistent request and its successful response.
+Outgoing-only instructions and notices keep their local estimates. Restored history and new messages also keep their local estimates.
+The tracker supplies these costs in the original message order. Normalization and eviction remove each message's assigned cost.
+The selector does not transfer the removed cost to the protected request.
+When heuristics overestimate usage, the existing additive correction remains. A mismatched status total does not reuse message weights.
+These values are estimates, not exact provider token counts for the reduced request. Resident and retained-request safety checks still apply.
 The final outgoing request is recorded only after successful selection, including stateless provenance-fallback calls.
-Accounting fallback alone does not reset cut state. Part 1 leaves the existing usage tracker unchanged.
+Accounting fallback alone does not reset cut state.
 
 ## Read-only session stats
 

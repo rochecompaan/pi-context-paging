@@ -368,6 +368,39 @@ test("uses a tracked measured anchor when raw history returns after paging", asy
 	assert.equal(hasMarker(second.messages, "NEXT_REQUEST"), true);
 });
 
+test("evicts consumed recovery through the extension without a false provider abort", async () => {
+	const harness = createHarness({
+		globalSettings: { contextPaging: { enabled: true, tokenBudget: 400 } }, projectTrusted: false,
+	});
+	const request = user("ACTIVE_RECOVERY_REQUEST");
+	harness.setBranch([entry("request", request)]);
+	await emit(harness, "context", { messages: [request] });
+	const warmup = { ...toolAssistant("warmup"), usage: { totalTokens: 90 } };
+	const warmupResult = result("warmup", "small result");
+	harness.setBranch([...harness.branch(), entry("warmup", warmup), entry("warmup-result", warmupResult)]);
+	await emit(harness, "turn_end", { message: warmup });
+
+	const load = toolAssistant("recovery");
+	const payload = result("recovery", "RECOVERY_PAYLOAD " + "x".repeat(3_000));
+	harness.setBranch([...harness.branch(), entry("load", load), entry("payload", payload)]);
+	harness.setContextUsage({ tokens: statusTokens(90, [warmupResult, load, payload]) });
+	const unread = await emit(harness, "context", { messages: harness.branch().map((item) => item.message) }) as any;
+	assert.equal(hasMarker(unread.messages, "RECOVERY_PAYLOAD"), true, "newest unread recovery remains protected");
+
+	const response = { ...toolAssistant("continuation"), usage: { totalTokens: 1_500 } };
+	const newest = result("continuation", "NEWEST_RESULT");
+	harness.setBranch([...harness.branch(), entry("response", response), entry("newest", newest)]);
+	await emit(harness, "turn_end", { message: response });
+	harness.setContextUsage({ tokens: statusTokens(1_500, [newest]) });
+	const stored = JSON.stringify(harness.branch());
+	const selected = await emit(harness, "context", { messages: harness.branch().map((item) => item.message) }) as any;
+	assert.equal(harness.abortCalls(), 0);
+	assert.equal(hasMarker(selected.messages, "RECOVERY_PAYLOAD"), false);
+	assert.equal(hasMarker(selected.messages, "ACTIVE_RECOVERY_REQUEST"), true);
+	assert.equal(hasMarker(selected.messages, "NEWEST_RESULT"), true);
+	assert.equal(JSON.stringify(harness.branch()), stored);
+});
+
 test("keeps persistent requests, outgoing instructions, and protected tool continuations", async () => {
 	const harness = createHarness({
 		globalSettings: { contextPaging: { enabled: true, tokenBudget: 300 } },

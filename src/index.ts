@@ -236,6 +236,7 @@ export default function contextPagingExtension(
 				trimToTokens: resolvedSettings.trimToTokens,
 				cutState: cutState.prepare(rawHistoryItems),
 				contextTokens,
+				tokenEstimates: usageTracker.tokenEstimates,
 				outgoingOnly,
 				rawHistoryItems,
 			});

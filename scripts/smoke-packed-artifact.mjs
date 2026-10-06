@@ -12,6 +12,7 @@ const expectedFiles = [
   "README.md",
   "docs/architecture.md",
   "package.json",
+  "src/context-calibration.ts",
   "src/context-cut.ts",
   "src/context-policy.ts",
   "src/context-usage.ts",
