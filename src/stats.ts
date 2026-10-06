@@ -54,7 +54,8 @@ function savedHistoryTokens(entries: readonly SessionEntry[]): number {
 function recordedUsage(entries: readonly SessionEntry[]): unknown[] {
 	const records: unknown[] = [];
 	for (const entry of entries) {
-		if (entry.type === "usage" || entry.type === "compaction" || entry.type === "branch_summary") records.push(entry.usage);
+		if (entry.type === "usage") records.push(entry.usage);
+		else if ((entry.type === "compaction" || entry.type === "branch_summary") && entry.usage) records.push(entry.usage);
 		else if (entry.type === "message") {
 			if (entry.message.role === "assistant") records.push(entry.message.usage);
 			else if (entry.message.role === "toolResult" && entry.message.usage !== undefined) records.push(entry.message.usage);
@@ -63,12 +64,10 @@ function recordedUsage(entries: readonly SessionEntry[]): unknown[] {
 	return records;
 }
 
+/** Recorded counters match footer totals; synthetic zero usage contributes zero. */
 function totalCounter(records: readonly unknown[], key: string): number | undefined {
-	if (records.length === 0) return undefined;
 	let total = 0;
 	for (const record of records) {
-		// SDK defaults can be all zero even when the provider supplies no usage.
-		if (!hasMeasurement(record)) return undefined;
 		const value = usageField(record, key);
 		if (value === undefined || counter(total + value) === undefined) return undefined;
 		total += value;
@@ -118,20 +117,23 @@ export async function contextPagingStats(
 	const percent = input ? (input.tokens / budget * 100).toFixed(1) : undefined;
 	const budgetNote = !enabled ? "   (inactive)" : percent === undefined ? "" : `   (${percent}% used)`;
 	const size = await storedBytes(ctx.sessionManager.getSessionFile());
+	const color = (role: "text" | "mdHeading" | "mdCode", text: string) =>
+		ctx.mode === "tui" ? ctx.ui.theme.fg(role, text) : text;
+	const row = (label: string, value: string) => color("text", field(label, value));
 	return [
-		`Context paging: ${enabled ? "on" : "off"}`,
+		enabled ? color("text", "Context paging: ") + color("mdCode", "on") : color("text", "Context paging: off"),
 		"",
-		"SESSION — complete saved history",
-		field("Stored size", bytes(size)),
-		field("History tokens", `~${number(historyTokens)}`),
+		color("mdHeading", "SESSION — complete saved history"),
+		row("Stored size", bytes(size)),
+		row("History tokens", `~${number(historyTokens)}`),
 		"",
-		"CONTEXT — latest model request",
-		field("Input tokens", input ? `${input.estimated ? "~" : ""}${number(input.tokens)}` : "unavailable"),
-		field("Paging budget", `${number(budget)}${budgetNote}`),
-		field("Model window", number(modelWindow)),
+		color("mdHeading", "CONTEXT — latest model request"),
+		row("Input tokens", input ? `${input.estimated ? "~" : ""}${number(input.tokens)}` : "unavailable"),
+		row("Paging budget", `${number(budget)}${budgetNote}`),
+		row("Model window", number(modelWindow)),
 		"",
-		"CACHE — whole-session totals",
-		field("Tokens read", number(totalCounter(records, "cacheRead"))),
-		field("Tokens written", number(totalCounter(records, "cacheWrite"))),
+		color("mdHeading", "CACHE — whole-session totals"),
+		row("Tokens read", number(totalCounter(records, "cacheRead"))),
+		row("Tokens written", number(totalCounter(records, "cacheWrite"))),
 	].join("\n");
 }

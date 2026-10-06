@@ -2,8 +2,9 @@ import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { stripVTControlCharacters } from "node:util";
 import test from "node:test";
-import { SessionManager, type RegisteredCommand } from "@earendil-works/pi-coding-agent";
+import { SessionManager, Theme, type ExtensionContext, type RegisteredCommand } from "@earendil-works/pi-coding-agent";
 import type { Usage } from "@earendil-works/pi-ai";
 import contextPagingExtension from "../src/index.ts";
 
@@ -20,6 +21,14 @@ const assistant = (reported: unknown = usage()) => ({
 	usage: reported as Usage, stopReason: "stop" as const, timestamp: 0,
 });
 
+function statsTheme(light = false): Theme {
+	// A real Theme with distinct colours for every role used by the notification.
+	return new Theme({
+		text: light ? "#111111" : "#eeeeee", dim: "#777777", muted: "#777777", thinkingXhigh: "#777777",
+		mdHeading: light ? "#003399" : "#66aaff", mdCode: light ? "#006600" : "#99ff99",
+	} as ConstructorParameters<typeof Theme>[0], { selectedBg: "#000000" } as ConstructorParameters<typeof Theme>[1], "truecolor");
+}
+
 function statsHarness(manager = SessionManager.inMemory(), enabled = true, tokenBudget = 128_000) {
 	const handlers = new Map<string, Handler>();
 	const commands = new Map<string, Omit<RegisteredCommand, "name" | "sourceInfo">>();
@@ -28,13 +37,17 @@ function statsHarness(manager = SessionManager.inMemory(), enabled = true, token
 	let appends = 0;
 	let aborts = 0;
 	const ctx = {
+		mode: "print" as ExtensionContext["mode"],
 		hasUI: false,
 		sessionManager: manager,
 		model: { contextWindow: 5_000 },
 		isIdle: () => true,
 		getSystemPrompt: () => systemPrompt,
 		getContextUsage: () => ({ tokens: 999_999, contextWindow: 5_000, percent: 100 }),
-		ui: { notify: (message: string, level: string) => notifications.push({ message, level }) },
+		ui: {
+			theme: statsTheme(),
+			notify: (message: string, level: string) => notifications.push({ message, level }),
+		},
 		abort: () => { aborts++; },
 	};
 	contextPagingExtension({
@@ -66,6 +79,53 @@ function field(report: string, label: string): string {
 	assert.ok(match, `Missing ${label} in:\n${report}`);
 	return match[1]!;
 }
+
+test("TUI stats overrides dim notifications with Markdown headings, code on, and text elsewhere", async () => {
+	const manager = SessionManager.inMemory();
+	manager.appendMessage(assistant());
+	const harness = statsHarness(manager);
+	const plain = await harness.report();
+	harness.ctx.mode = "tui";
+	harness.ctx.hasUI = true;
+	const theme = harness.ctx.ui.theme;
+	assert.ok(theme);
+	const report = await harness.report();
+	assert.equal(stripVTControlCharacters(report), plain);
+	assert.equal(harness.notifications.at(-1)!.level, "info");
+	const lines = report.split("\n");
+	assert.equal(lines[0], theme.fg("text", "Context paging: ") + theme.fg("mdCode", "on"));
+	for (const line of lines.slice(1)) {
+		const text = stripVTControlCharacters(line);
+		if (!text) continue;
+		const isHeading = /^(SESSION|CONTEXT|CACHE) —/.test(text);
+		assert.equal(line, theme.fg(isHeading ? "mdHeading" : "text", text));
+	}
+});
+
+test("TUI stats uses the current theme and keeps off in normal text", async () => {
+	const harness = statsHarness(SessionManager.inMemory(), false);
+	harness.ctx.mode = "tui";
+	harness.ctx.hasUI = true;
+	const dark = await harness.report();
+	assert.equal(dark.split("\n")[0], harness.ctx.ui.theme.fg("text", "Context paging: off"));
+	harness.ctx.ui.theme = statsTheme(true);
+	assert.ok(harness.ctx.ui.theme);
+	const light = await harness.report();
+	assert.notEqual(light, dark);
+	assert.equal(stripVTControlCharacters(light), stripVTControlCharacters(dark));
+	assert.equal(light.split("\n")[0], harness.ctx.ui.theme.fg("text", "Context paging: off"));
+});
+
+test("non-TUI stats notifications remain plain text even when UI is available", async () => {
+	const harness = statsHarness();
+	for (const mode of ["rpc", "json", "print"] as const) {
+		harness.ctx.mode = mode;
+		harness.ctx.hasUI = mode === "rpc";
+		const report = await harness.report();
+		assert.equal(report, stripVTControlCharacters(report));
+		assert.match(report, /^Context paging: on\n/);
+	}
+});
 
 test("stats includes inactive history and cache usage but reports only the latest request input", async () => {
 	const manager = SessionManager.inMemory();
@@ -138,35 +198,52 @@ test("missing cache components make only their whole-session total unavailable",
 	assert.equal(field(report, "Input tokens"), "unavailable");
 });
 
-test("explicit zero cache counts remain distinguishable from absent usage", async () => {
+test("recorded cache totals start at zero like the footer", async () => {
 	const manager = SessionManager.inMemory();
 	manager.appendMessage(assistant(usage(0, 0)));
 	const known = await statsHarness(manager).report();
 	assert.equal(field(known, "Tokens read"), "0");
 	assert.equal(field(known, "Tokens written"), "0");
 	const absent = await statsHarness().report();
-	assert.equal(field(absent, "Tokens read"), "unavailable");
-	assert.equal(field(absent, "Tokens written"), "unavailable");
+	assert.equal(field(absent, "Tokens read"), "0");
+	assert.equal(field(absent, "Tokens written"), "0");
 	assert.equal(field(absent, "Stored size"), "unavailable");
 });
 
-test("a successful response with only default zero usage is not a provider measurement", async () => {
+test("a successful response with default zero usage contributes zero cache tokens but no input measurement", async () => {
 	const manager = SessionManager.inMemory();
 	manager.appendMessage(assistant(usage(0, 0, 0, 0)));
 	const report = await statsHarness(manager).report();
 	assert.equal(field(report, "Input tokens"), "unavailable");
-	assert.equal(field(report, "Tokens read"), "unavailable");
-	assert.equal(field(report, "Tokens written"), "unavailable");
+	assert.equal(field(report, "Tokens read"), "0");
+	assert.equal(field(report, "Tokens written"), "0");
 });
 
-test("a failed response with synthetic zero usage does not hide missing cache measurements", async () => {
+test("failed responses with synthetic zero usage do not hide recorded cache totals", async () => {
 	const manager = SessionManager.inMemory();
 	manager.appendMessage(assistant());
-	manager.appendMessage({ ...assistant(usage(0, 0, 0, 0)), stopReason: "error" });
-	const report = await statsHarness(manager).report();
-	assert.equal(field(report, "Tokens read"), "unavailable");
-	assert.equal(field(report, "Tokens written"), "unavailable");
+	for (let i = 0; i < 6; i++) {
+		manager.appendMessage({ ...assistant(usage(0, 0, 0, 0)), stopReason: i % 2 ? "error" : "aborted" });
+	}
+	let report = await statsHarness(manager).report();
+	assert.equal(field(report, "Tokens read"), "120");
+	assert.equal(field(report, "Tokens written"), "20");
 	assert.equal(field(report, "Input tokens"), "unavailable");
+	manager.appendMessage(assistant(usage(200, 30)));
+	report = await statsHarness(manager).report();
+	assert.equal(field(report, "Tokens read"), "320");
+	assert.equal(field(report, "Tokens written"), "50");
+});
+
+test("summary entries without optional usage do not hide the footer's recorded cache totals", async () => {
+	const manager = SessionManager.inMemory();
+	const root = manager.appendMessage(user("abcd"));
+	manager.appendMessage(assistant());
+	manager.appendCompaction("abcd", root, 1_000);
+	manager.branchWithSummary(root, "abcd");
+	const report = await statsHarness(manager).report();
+	assert.equal(field(report, "Tokens read"), "120");
+	assert.equal(field(report, "Tokens written"), "20");
 });
 
 test("invalid cache counts do not become plausible totals", async () => {
