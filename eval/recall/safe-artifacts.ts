@@ -2,7 +2,7 @@ const privateFields = new Set([
 	"authorization", "proxyauthorization", "headers", "requestheaders", "responseheaders", "cookie", "cookies",
 	"setcookie", "apikey", "accesskey", "secretkey", "accesstoken", "refreshtoken", "idtoken", "token",
 	"credential", "credentials", "credentialresolution", "auth", "authentication", "authstorage",
-	"environment", "env", "encryptedcontent", "thinkingsignature", "signature", "secret", "password",
+	"environment", "env", "encryptedcontent", "thinkingsignature", "signature", "secret", "password", "errormessage", "stack", "stacktrace",
 ]);
 const modelFields = new Set(["provider", "id", "api", "contextWindow", "maxTokens", "cost", "reasoning", "thinkingLevelMap"]);
 const costFields = new Set(["input", "output", "cacheRead", "cacheWrite", "total", "tiers"]);
