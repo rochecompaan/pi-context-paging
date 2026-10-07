@@ -384,7 +384,12 @@ Run the performance benchmark:
 npm run bench
 ```
 
-See the [full-budget recall evaluation guide](docs/evals/full-budget-recall.md) for the development-only pilot and batch harness.
+## Recall evaluation
+
+The development-only [recall harness](docs/evals/full-budget-recall.md) compares baseline Pi with paging in fresh conversations.
+One pilot at [`fda59ef`](https://github.com/rochecompaan/pi-context-paging/commit/fda59ef60429c439dd004167452158f3567e4d63) scored paging at 4/5 known facts per stage.
+Baseline scored 5/5 before native compaction and 0/5 afterward.
+Paging missed both revised decisions. These results are preliminary.
 
 ## Upgrade and removal
 
