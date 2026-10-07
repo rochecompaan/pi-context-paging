@@ -14,11 +14,11 @@ import { sanitizeArtifact } from "../eval/recall/safe-artifacts.ts";
 async function fixture(t: test.TestContext) {
 	const root = await mkdtemp(join(tmpdir(), "recall-artifact-")); t.after(() => rm(root, { recursive: true, force: true }));
 	const workload = buildWorkload("artifact-fixture");
-	const pair = await runPair({ seed: workload.seed, firstArm: "baseline", workload,
+	const pair = await runPair({ seed: workload.seed, stage: "A", firstArm: "baseline", workload,
 		createArm: async options => makeScriptedArm({ ...options, workload, beforeAttempt: options.requestGuard, order: [] }).instance });
 	const manifest = buildManifest({ runId: "fixture", mode: "pilot", sourceRevision: "a".repeat(40), sourceIntegrity: "clean-checkout-v1",
 		sdkVersion: "0.87.1", nodeVersion: process.version, modelMetadata: pair.snapshots.baseline!.modelMetadata,
-		limits: defaultLimits, seeds: [pair.seed], firstArms: [pair.firstArm] });
+		limits: defaultLimits, seeds: [pair.seed], stages: [pair.stage], firstArms: [pair.firstArm] });
 	return { directory: join(root, "run"), pair, manifest };
 }
 async function files(directory: string): Promise<string[]> {
@@ -33,7 +33,7 @@ async function files(directory: string): Promise<string[]> {
 test("private artifacts retain prompts, transcripts, traces, events, probes and final summaries", async t => {
 	const f = await fixture(t), writer = await createArtifactWriter(f.directory, f.manifest);
 	writer.appendEvent(f.pair.seed, "baseline", { type: "payload", eventIndex: 1, promptId: f.pair.steps[0].id, requestId: "baseline-request-1" });
-	await writer.appendProgress({ type: "prompt-idle", seed: f.pair.seed, step: f.pair.steps[0], arm: "baseline", snapshots: f.pair.snapshots,
+	await writer.appendProgress({ type: "prompt-idle", seed: f.pair.seed, stage: f.pair.stage, step: f.pair.steps[0], arm: "baseline", snapshots: f.pair.snapshots,
 		promptCounts: f.pair.promptCounts, sentAttempts: f.pair.sentAttempts });
 	await writer.finish(f.pair);
 	assert.equal((await stat(f.directory)).mode & 0o777, 0o700);
@@ -67,7 +67,7 @@ test("exports omit credentials, raw errors and encrypted signatures while keepin
 
 test("a failed final write retains earlier private progress and rejects further writes", async t => {
 	const f = await fixture(t), writer = await createArtifactWriter(f.directory, f.manifest);
-	await writer.appendProgress({ type: "prompt-idle", seed: f.pair.seed, step: f.pair.steps[0], arm: "baseline", snapshots: f.pair.snapshots,
+	await writer.appendProgress({ type: "prompt-idle", seed: f.pair.seed, stage: f.pair.stage, step: f.pair.steps[0], arm: "baseline", snapshots: f.pair.snapshots,
 		promptCounts: f.pair.promptCounts, sentAttempts: f.pair.sentAttempts });
 	await rm(join(f.directory, "results.json"));
 	await mkdir(join(f.directory, "results.json"));

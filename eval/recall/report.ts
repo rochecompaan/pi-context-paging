@@ -67,18 +67,20 @@ export function renderReport(manifest: RunManifest, pairs: readonly PairResult[]
 		`Model: ${cell(manifest.modelMetadata?.provider)}/${cell(manifest.modelMetadata?.id)}. Thinking: ${manifest.thinking}. Transport: ${manifest.transport}.`,
 		`Native context window: ${cell(manifest.modelMetadata?.contextWindow)}. Paging budget: ${manifest.paging.tokenBudget}. Trim target: ${manifest.paging.trimToTokens}.`,
 		`SDK: ${cell(manifest.sdkVersion)}. Node.js: ${cell(manifest.nodeVersion)}. Experiment: ${manifest.experimentHash}.`, "",
+		"Stages A and B use independent conversations. No A probes run in the B conversations.",
 		`Eligible pairs: ${eligible.length}/${pairs.length}. No winner is declared from incomplete or contaminated observations.`, "",
 		"Opaque reasoning is not inspected. Plaintext absence does not prove that a fact is absent from opaque reasoning.",
 		"Recovery attribution requires a matching successful history-tool result before a correct final answer.", "", "## Paired summaries", "",
 		"| Stage | Eligible pairs | Baseline known | Paging known | Paired known difference | Qualified difference |", "| --- | --- | --- | --- | --- | --- |"];
 	for (const stage of ["A", "B"] as const) {
-		const known = eligible.flatMap(pair => pair.stages[stage].probes).filter(probe => probe.probe.factId && probe.comparisonEligible);
-		lines.push(`| Stage ${stage} | ${eligible.length} | ${fraction(known, "baseline")} | ${fraction(known, "paging")} | ${difference(known)} | ${difference(known.filter(probe => probe.paging.evidence.qualified))} |`);
+		const selected = eligible.filter(pair => pair.stage === stage);
+		const known = selected.flatMap(pair => pair.stages[stage].probes).filter(probe => probe.probe.factId && probe.comparisonEligible);
+		lines.push(`| Stage ${stage} | ${selected.length} | ${fraction(known, "baseline")} | ${fraction(known, "paging")} | ${difference(known)} | ${difference(known.filter(probe => probe.paging.evidence.qualified))} |`);
 	}
 	for (const pair of pairs) {
-		lines.push("", `## Pair ${cell(pair.seed)}`, "", `Status: ${pair.status}. First arm: ${pair.firstArm}. Shared prompts: ${pair.steps.length}.`,
+		lines.push("", `## Pair ${cell(pair.seed)}`, "", `Status: ${pair.status}. Stage: ${pair.stage}. First arm: ${pair.firstArm}. Shared prompts: ${pair.steps.length}.`,
 			`Stop reason: ${cell(pair.stopReason ?? "none")}. Errors: ${cell(pair.errors.map(error => error.code).join(", ") || "none")}.`,
-			`Cross-stage exposure: ${cell(pair.crossStageExposure.join(", ") || "none")}.`, "", ...stageRows(pair, "A"), "", ...stageRows(pair, "B"), "", ...usageRows(pair));
+			`Unused-stage facts returned (diagnostic only): ${cell(pair.crossStageExposure.join(", ") || "none")}.`, "", ...stageRows(pair, pair.stage), "", ...usageRows(pair));
 	}
 	return `${lines.join("\n")}\n`;
 }

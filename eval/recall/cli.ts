@@ -13,7 +13,7 @@ import type { PairOptions, PairResult } from "./pair.ts";
 import type { EvalArm, Clock } from "./pi-arm.ts";
 import type { JournalEvent } from "./pi-journal.ts";
 import type { RequestMeta } from "./codex-payload.ts";
-import type { Arm } from "./workload.ts";
+import type { Arm, Stage } from "./workload.ts";
 export { parseEvalArgs } from "./cli-options.ts";
 export type { EvalCliOptions } from "./cli-options.ts";
 
@@ -32,13 +32,13 @@ export type EvalCliDependencies = {
 	log(line: string): void;
 };
 function reject(code: string): never { throw Object.assign(new Error("Recall evaluation blocked"), { code }); }
-async function loadPilot(path: string): Promise<{ manifest: RunManifest; result: PairResult }> {
+async function loadPilot(path: string): Promise<{ manifest: RunManifest; results: PairResult[] }> {
 	const manifest = JSON.parse(await readFile(path, "utf8")) as RunManifest;
 	const results = JSON.parse(await readFile(join(dirname(path), "results.json"), "utf8")) as { pairs: PairResult[] };
 	const completion = JSON.parse(await readFile(join(dirname(path), "completion.json"), "utf8")) as { status: string; runId: string; experimentHash: string; pairs: number };
 	if (completion.status !== "complete" || completion.runId !== manifest.runId || completion.experimentHash !== manifest.experimentHash
-		|| completion.pairs !== 1 || !Array.isArray(results.pairs) || results.pairs.length !== 1) reject("INVALID_PILOT_RESULTS");
-	return { manifest, result: results.pairs[0] };
+		|| completion.pairs !== 2 || !Array.isArray(results.pairs) || results.pairs.length !== 2) reject("INVALID_PILOT_RESULTS");
+	return { manifest, results: results.pairs };
 }
 
 /** Live code is loaded only after clean-source and cheap pilot checks. */
@@ -46,18 +46,22 @@ export async function runEval(options: EvalCliOptions, dependencies: EvalCliDepe
 	const log = dependencies.log;
 	if (options.mode === "dry-run") {
 		log(`Dry run: no credentials, sessions or model requests. ${EVAL_MODEL.provider}/${EVAL_MODEL.id}, ${EVAL_MODEL.thinking}, SSE; paging ${PAGING_SETTINGS.tokenBudget}/${PAGING_SETTINGS.trimToTokens}.`);
-		log(`Safety limits: ${JSON.stringify(options.limits)}. Use --pilot for one pair, then --batch --pilot-manifest <path>.`);
-		log(`Workload: ${WORKLOAD_VERSION}, seed ${JSON.stringify(options.seed)}; at least 24 shared prompts. Stage A follows source exclusion; stage B follows native compaction.`);
+		log(`Safety limits: ${JSON.stringify(options.limits)}. Use --pilot for one fresh pair per stage, then --batch --pilot-manifest <path>.`);
+		log(`Workload: ${WORKLOAD_VERSION}, seed ${JSON.stringify(options.seed)}; at least 24 shared prompts per stage pair. Fresh A conversations follow source exclusion; fresh B conversations follow native compaction.`);
 		log(`Artifacts: ${JSON.stringify(options.outputDirectory)}/<run-id>; manifest.json, results.json, report.md, completion.json and private per-arm evidence.`);
 		return 0;
 	}
-	const seeds = options.mode === "pilot" ? [options.seed] : Array.from({ length: options.pairs }, (_, i) => `${options.seed}-${i + 1}`);
-	const firstArms: Arm[] = seeds.map((_, i) => i % 2 ? "paging" : "baseline");
+	const roots = options.mode === "pilot" ? [options.seed] : Array.from({ length: options.pairs }, (_, i) => `${options.seed}-${i + 1}`);
+	const schedule = roots.flatMap((seed, index) => (["A", "B"] as const).map((stage, offset) => ({
+		seed: `${seed}-stage-${stage}`, stage, firstArm: ((index + offset) % 2 ? "paging" : "baseline") as Arm,
+	})));
+	const seeds = schedule.map(pair => pair.seed), stages: Stage[] = schedule.map(pair => pair.stage);
+	const firstArms = schedule.map(pair => pair.firstArm);
 	const runId = `${new Date().toISOString().replace(/[:.]/g, "-")}-${randomUUID()}`;
 	let source: CleanSourceSnapshot | null = null, sourceFailed = false, writer: ArtifactWriter | undefined, live: LiveEval | undefined;
 	let infrastructureError: unknown = null, latest: PairResult | undefined, exitCode = 0;
 	let manifest = buildManifest({ runId, mode: options.mode, sourceRevision: null, sourceIntegrity: null,
-		sdkVersion: "unavailable", nodeVersion: process.version, modelMetadata: null, limits: options.limits, seeds, firstArms });
+		sdkVersion: "unavailable", nodeVersion: process.version, modelMetadata: null, limits: options.limits, seeds, stages, firstArms });
 	const rebuild = () => buildManifest({ ...manifest, sourceRevision: source?.sourceRevision ?? null,
 		sourceIntegrity: sourceFailed ? null : source?.sourceIntegrity ?? null });
 	const verify = () => {
@@ -77,15 +81,15 @@ export async function runEval(options: EvalCliOptions, dependencies: EvalCliDepe
 		if (options.mode === "batch") {
 			pilot = await loadPilot(resolve(dependencies.repoRoot, options.pilotManifestPath!));
 			const provisional = buildManifest({ ...manifest, sdkVersion: pilot.manifest.sdkVersion, modelMetadata: pilot.manifest.modelMetadata });
-			if (!isEligiblePilot(pilot.manifest, pilot.result, provisional).eligible) reject("INELIGIBLE_PILOT");
+			if (!isEligiblePilot(pilot.manifest, pilot.results, provisional).eligible) reject("INELIGIBLE_PILOT");
 		}
 		verify(); live = await dependencies.loadLive(); verify();
 		manifest = buildManifest({ ...rebuild(), sdkVersion: live.sdkVersion, modelMetadata: live.modelMetadata });
 		await writer.updateManifest(manifest);
-		if (pilot && !isEligiblePilot(pilot.manifest, pilot.result, manifest).eligible) reject("PILOT_EXPERIMENT_CHANGED");
+		if (pilot && !isEligiblePilot(pilot.manifest, pilot.results, manifest).eligible) reject("PILOT_EXPERIMENT_CHANGED");
 		for (let index = 0; index < seeds.length; index++) {
 			verify(); const seed = seeds[index];
-			latest = await live.runPair({ seed, firstArm: firstArms[index], limits: options.limits, clock: dependencies.clock,
+			latest = await live.runPair({ seed, stage: stages[index], firstArm: firstArms[index], limits: options.limits, clock: dependencies.clock,
 				createArm: async armOptions => {
 					verify();
 					return live!.createArm({ ...armOptions, seed,
@@ -107,7 +111,7 @@ export async function runEval(options: EvalCliOptions, dependencies: EvalCliDepe
 				manifest = rebuild(); await writer.updateManifest(manifest);
 			}
 			await writer.finish(latest); verify();
-			log(`Pair ${seed}: ${latest.status}; ${latest.steps.length} shared prompts; HTTP attempts ${JSON.stringify(latest.sentAttempts)}.`);
+			log(`Stage ${latest.stage} pair ${seed}: ${latest.status}; ${latest.steps.length} shared prompts; HTTP attempts ${JSON.stringify(latest.sentAttempts)}.`);
 			if (infrastructureError || latest.errors.length && !latest.stopReason) { exitCode = 2; break; }
 			if (latest.status !== "complete") exitCode = 3;
 			if (latest.status === "incomplete") break;

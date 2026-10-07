@@ -1,6 +1,7 @@
 # Full-budget recall evaluation
 
-This development harness compares two long Pi sessions with identical prompts.
+This development harness compares fresh baseline and paging sessions with identical prompts in each matched pair.
+Stages A and B use separate pairs and do not share conversation history.
 The baseline uses native compaction. The paging session uses the real extension and its four history tools.
 Production paging code does not change.
 
@@ -45,17 +46,19 @@ After a harness fix, rerun automated verification, commit the fix, and run a new
 ## Pilot and batch
 
 A matched pair contains one baseline session and one paging session.
-Start with one pilot pair:
+Start with one pilot containing one fresh pair per stage, or four sessions:
 
 ```sh
-npm run eval:recall -- --pilot --seed pilot-v1
+npm run eval:recall -- --pilot --seed pilot-independent-v2
 ```
 
 The CLI prints its artifact directory. Read that directory's `report.md`, `manifest.json`, and `results.json` before a batch.
-The pilot must finish both recall stages and at least 24 shared prompts.
-Stage A requires paging source exclusion and four qualified known probes.
-Stage B requires successful native baseline compaction before its first probe.
-The stages use different facts. A fact exposed by stage A cannot count as independent stage B evidence.
+The pilot must finish both independent stage pairs, each with at least 24 shared prompts and six probes.
+Both arms receive the facts and decision revisions at the start of their pair.
+Stage A requires paging source exclusion and four qualified known probes before any successful baseline compaction.
+Stage B starts fresh and requires successful native baseline compaction before its first probe.
+The B conversations receive no A probes, answers, recovery results, or summaries.
+Distinct seeds and fresh session managers keep the stages separate.
 
 A qualified probe has an exact answer absent from the readable first request.
 The original source entries must also be outside that request.
@@ -68,22 +71,26 @@ Contamination, incomplete traces, missing stages, safety stops, source changes, 
 The source revision, Node.js version, SDK version, model metadata, transport, and configuration must match the pilot.
 `completion.json` records successful finalization after session cleanup and artifact writes.
 Without this file, stale complete summaries cannot authorize a batch after a write failure.
+Schema version 2 identifies the independent-stage experiment. Old shared-conversation pilots cannot authorize this batch.
 
-Use the eligible pilot manifest to run three new pairs:
+Use the eligible pilot manifest to run three new pairs per stage, or twelve sessions:
 
 ```sh
 npm run eval:recall -- --batch --pilot-manifest .pi/evals/full-budget-recall/<pilot-run-id>/manifest.json
 ```
 
-Batch seeds default to `batch-v1-1`, `batch-v1-2`, and `batch-v1-3`.
-The first session alternates baseline, paging, baseline.
+Batch seed roots default to `batch-v1-1`, `batch-v1-2`, and `batch-v1-3`.
+Each root produces distinct `-stage-A` and `-stage-B` seeds.
+The first arm for A alternates baseline, paging, baseline. The first arm for B alternates paging, baseline, paging.
+`--pairs` sets the number of repetitions per stage, not the combined pair count.
 The pilot never contributes to the batch aggregate.
 For later repetitions, use `--seed` and `--pairs` without changing the fixed model or budgets.
 Invalid or incomplete pairs remain in the report. The harness does not silently replace them.
 
 ## Limits and exit codes
 
-The default safety limits are 64 user prompts, 12 requests per prompt, 256 requests per session, and 120 minutes per pair.
+The default safety limits are 64 user prompts, 12 requests per prompt, 256 requests per session, and 120 minutes per stage pair.
+The A and B pairs have separate limits. The pilot can therefore run longer and cost more than the old single-conversation pilot.
 Request limits count actual HTTP attempts, including retries, recovery follow-ups, and native compaction calls.
 These flags accept positive integers:
 
@@ -118,6 +125,8 @@ Partial artifacts remain useful even when no completion record exists.
 
 Reports separate stage A and stage B, known facts and unknown controls, categories, revised decisions, and qualified-probe counts.
 They retain individual pairs and paired score differences.
+An inconclusive stage does not remove the other stage's valid independent observations.
+Facts from the unused stage returned during A are diagnostic only. They do not refresh B's separate conversation.
 Recovery attribution requires a matching successful history-tool result before a correct final answer.
 The usage report counts each persisted entry once and shows compaction as a subtotal, not an extra charge.
 Missing token measurements remain unknown rather than zero.
@@ -126,5 +135,5 @@ SDK session statistics are a separate cross-check.
 Costs are catalog estimates from SDK usage, not Codex invoices.
 Long sessions can consume substantial tokens even when the request limit is not reached.
 Latency includes the session lifecycle. The report records actual HTTP attempt counts.
-Three pairs provide preliminary evidence, not a general claim that paging improves recall.
+Three pairs per stage provide preliminary evidence, not a general claim that paging improves recall.
 Do not call an incomplete or contaminated pair a winner.

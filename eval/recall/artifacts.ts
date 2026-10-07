@@ -97,7 +97,8 @@ export async function createArtifactWriter(directory: string, initial: RunManife
 			});
 		},
 		updateManifest(next) {
-			if (next.runId !== manifest.runId || JSON.stringify(next.seeds) !== JSON.stringify(manifest.seeds)) throw new Error("Artifact run identity changed");
+			if (next.runId !== manifest.runId || JSON.stringify(next.seeds) !== JSON.stringify(manifest.seeds)
+				|| JSON.stringify(next.stages) !== JSON.stringify(manifest.stages)) throw new Error("Artifact run identity changed");
 			manifest = next;
 			return enqueue(async () => { await atomic(join(directory, "manifest.json"), json(manifest)); await summaries(); });
 		},

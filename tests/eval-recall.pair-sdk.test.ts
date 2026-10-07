@@ -8,12 +8,12 @@ import { createPiArm } from "../eval/recall/pi-arm.ts";
 import { buildWorkload, factForProbe, type Arm } from "../eval/recall/workload.ts";
 import { fixtureRuntime, measuredUsage } from "./fixtures/eval-recall-provider.ts";
 
-test("the controller reaches both full-budget stages through real SDK sessions and native compaction without a network", async t => {
-	const workload = buildWorkload("full-budget-controller-fixture");
+for (const stage of ["A", "B"] as const) test(`isolated stage ${stage} reaches its boundary through fresh real SDK sessions without a network`, async t => {
+	const workload = buildWorkload(`full-budget-controller-fixture-${stage}`);
 	const directory = await mkdtemp(join(tmpdir(), "recall-pair-sdk-"));
 	t.after(() => rm(directory, { recursive: true, force: true }));
 	const fixtures = new Map<Arm, Awaited<ReturnType<typeof fixtureRuntime>>>();
-	const result = await runPair({ seed: workload.seed, firstArm: "baseline", workload,
+	const result = await runPair({ seed: workload.seed, stage, firstArm: "baseline", workload,
 		createArm: async ({ arm, requestGuard, clock }) => {
 			const fixture = await fixtureRuntime((_, transcript) => {
 				const user = transcript.messages.filter(message => message.role === "user").at(-1);
@@ -28,12 +28,13 @@ test("the controller reaches both full-budget stages through real SDK sessions a
 				createRuntime: async () => fixture.runtime });
 		} });
 	assert.equal(result.status, "complete", JSON.stringify({ errors: result.errors, stages: result.stages, stop: result.stopReason }));
-	assert.equal(result.probes.length, 12);
+	assert.equal(result.probes.length, 6);
+	assert.ok(result.steps.filter(step => step.kind === "probe").every(step => step.stage === stage));
 	assert.ok(result.promptCounts.baseline >= 24 && result.promptCounts.baseline <= 64);
-	assert.equal(result.stages.A.qualifiedKnown, 5);
-	assert.ok(result.snapshots.baseline!.compactions.some(event => event.success));
+	assert.equal(result.stages[stage].qualifiedKnown, 5);
+	assert.equal(result.snapshots.baseline!.compactions.some(event => event.success), stage === "B");
 	assert.ok(!result.snapshots.paging!.compactions.some(event => event.success));
-	assert.ok(result.snapshots.baseline!.requests.some(request => request.purpose === "compaction"));
+	assert.equal(result.snapshots.baseline!.requests.some(request => request.purpose === "compaction"), stage === "B");
 	assert.equal(result.sentAttempts.baseline, fixtures.get("baseline")!.dispatches.length);
 	assert.equal(result.sentAttempts.paging, fixtures.get("paging")!.dispatches.length);
 	assert.equal(result.snapshots.paging!.modelMetadata.contextWindow, fixtureModelWindow(fixtures.get("paging")!));

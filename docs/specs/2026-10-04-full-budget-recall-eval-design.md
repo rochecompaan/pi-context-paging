@@ -4,6 +4,10 @@ Date: 2026-10-04
 
 Status: Written spec approved for implementation planning on 2026-10-05.
 
+The user approved separate stage conversations on 2026-10-07.
+`2026-10-07-independent-recall-stages-design.md` replaces this spec's shared-conversation rules and pilot counts.
+This file preserves the original design and the unchanged configuration and evidence requirements.
+
 ## Purpose
 
 This eval compares Pi with and without `pi-context-paging` during one long session per arm.

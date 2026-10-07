@@ -43,7 +43,7 @@ export function makeScriptedArm(options: {
 			}
 			state = { ...state, requests: [...state.requests, request], finalAnswerText, finalAnswerEventIndex: received.length * 10 };
 			// This compaction follows the request. Only the NEXT payload excludes the originals.
-			if (arm === "baseline" && step.id === "work-0") state = { ...state, compactions: [...state.compactions,
+			if (arm === "baseline" && step.id === "work-12") state = { ...state, compactions: [...state.compactions,
 				{ eventIndex: received.length * 10 + 1, reason: "threshold", success: true }] };
 			state = { ...state, ...options.script?.(step, state) };
 			await options.onPrompt?.(step);

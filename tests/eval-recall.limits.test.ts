@@ -69,7 +69,7 @@ test("a deadline during second-arm startup closes the first arm and any late-cre
 	const blocked = new Promise<void>(resolve => { release = resolve; });
 	const lateClosed = new Promise<void>(resolve => { disposed = resolve; });
 	let first!: ReturnType<typeof makeScriptedArm>, late!: ReturnType<typeof makeScriptedArm>;
-	const running = runPair({ seed: workload.seed, workload, firstArm: "baseline", clock: fake.clock,
+	const running = runPair({ seed: workload.seed, stage: "A", workload, firstArm: "baseline", clock: fake.clock,
 		createArm: async ({ arm, requestGuard }) => {
 			const fixture = makeScriptedArm({ arm, workload, beforeAttempt: requestGuard, order: [] });
 			if (arm === "baseline") { first = fixture; return fixture.instance; }
@@ -101,7 +101,7 @@ test("the startup deadline aborts an active prompt, preserves partial evidence, 
 	const started = new Promise<void>(resolve => { entered = resolve; });
 	const active = new Promise<void>(resolve => { release = resolve; });
 	const arms: ReturnType<typeof makeScriptedArm>[] = [];
-	const running = runPair({ seed: workload.seed, workload, firstArm: "baseline", clock: fake.clock,
+	const running = runPair({ seed: workload.seed, stage: "A", workload, firstArm: "baseline", clock: fake.clock,
 		createArm: async ({ arm, requestGuard }) => {
 			const fixture = makeScriptedArm({ arm, workload, beforeAttempt: requestGuard, order: [],
 				onPrompt: async () => { entered(); await active; }, onAbort: release });

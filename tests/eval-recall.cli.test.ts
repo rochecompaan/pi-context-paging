@@ -50,7 +50,23 @@ test("default and explicit dry runs never inspect credentials, load live modules
 	assert.ok(f.outputs.some(line => line.includes("Dry run")));
 });
 
-test("a complete pilot authorizes three distinct alternating pairs without requiring perfect answers", async t => {
+test("a pilot uses four fresh sessions and keeps A probes out of the B conversations", async t => {
+	const f = await fixture(t);
+	assert.equal(await runEval(parseEvalArgs(["--pilot", "--seed", "isolated"]), f.dependencies), 0);
+	assert.equal(f.arms.length, 4);
+	const { pairs } = JSON.parse(await readFile(join(f.directories[0], "results.json"), "utf8"));
+	assert.deepEqual(pairs.map((pair: { stage: string }) => pair.stage), ["A", "B"]);
+	for (let index = 0; index < 4; index++) {
+		const expected = index < 2 ? "A" : "B", received = f.arms[index].received;
+		assert.equal(received.filter(step => step.kind === "probe").length, 6);
+		assert.ok(received.filter(step => step.kind === "probe").every(step => step.stage === expected));
+		assert.ok(received.slice(0, 12).every(step => step.kind === "seed" || step.kind === "revision"));
+	}
+	const directories = await readdir(join(f.directories[0], "pairs"));
+	assert.equal(directories.length, 2);
+});
+
+test("a complete pilot authorizes three fresh alternating pairs per stage without requiring perfect answers", async t => {
 	const f = await fixture(t);
 	const create = f.live.createArm;
 	f.live.createArm = async options => {
@@ -62,9 +78,11 @@ test("a complete pilot authorizes three distinct alternating pairs without requi
 	const pilot = join(f.directories[0], "manifest.json");
 	assert.equal(await runEval(parseEvalArgs(["--batch", "--pilot-manifest", pilot]), f.dependencies), 0);
 	const manifest = JSON.parse(await readFile(join(f.directories[1], "manifest.json"), "utf8"));
-	assert.equal(new Set(manifest.seeds).size, 3); assert.deepEqual(manifest.firstArms, ["baseline", "paging", "baseline"]);
+	assert.equal(new Set(manifest.seeds).size, 6);
+	assert.deepEqual(manifest.stages, ["A", "B", "A", "B", "A", "B"]);
+	assert.deepEqual(manifest.firstArms, ["baseline", "paging", "paging", "baseline", "baseline", "paging"]);
 	const { pairs } = JSON.parse(await readFile(join(f.directories[1], "results.json"), "utf8"));
-	assert.equal(pairs.length, 3); assert.ok(pairs.every((pair: { status: string }) => pair.status === "complete"));
+	assert.equal(pairs.length, 6); assert.ok(pairs.every((pair: { status: string }) => pair.status === "complete"));
 	assert.ok(f.arms.every(arm => arm.disposed && arm.aborted)); assert.equal(f.cleanup, 2);
 });
 
@@ -75,7 +93,7 @@ test("dirty source at unchanged HEAD blocks batch before live imports or arm cre
 	await f.put("eval/recall/codex-runtime.ts", "export const changed = true;\n");
 	assert.equal(f.git("rev-parse", "HEAD"), revision);
 	assert.equal(await runEval(parseEvalArgs(["--batch", "--pilot-manifest", join(f.directories[0], "manifest.json")]), f.dependencies), 2);
-	assert.equal(f.loads, 1); assert.equal(f.arms.length, 2);
+	assert.equal(f.loads, 1); assert.equal(f.arms.length, 4);
 	const manifest = JSON.parse(await readFile(join(f.directories[1], "manifest.json"), "utf8"));
 	assert.equal(manifest.sourceIntegrity, null);
 });
@@ -93,7 +111,7 @@ for (const mutation of ["window", "settings", "missing-policy", "incomplete"] as
 		}
 		await writeFile(path, JSON.stringify(manifest));
 		assert.equal(await runEval(parseEvalArgs(["--batch", "--pilot-manifest", path]), f.dependencies), 2);
-		assert.equal(f.loads, 1); assert.equal(f.arms.length, 2);
+		assert.equal(f.loads, 1); assert.equal(f.arms.length, 4);
 	});
 }
 
@@ -101,7 +119,7 @@ test("a changed resolved native model is rejected before batch sessions", async 
 	const f = await fixture(t); assert.equal(await runEval(parseEvalArgs(["--pilot"]), f.dependencies), 0);
 	f.live.modelMetadata = { ...f.live.modelMetadata, contextWindow: 300000 };
 	assert.equal(await runEval(parseEvalArgs(["--batch", "--pilot-manifest", join(f.directories[0], "manifest.json")]), f.dependencies), 2);
-	assert.equal(f.arms.length, 2);
+	assert.equal(f.arms.length, 4);
 });
 
 test("source mutation during a prompt blocks the next dispatch, clears policy and closes both arms", async t => {
@@ -188,7 +206,7 @@ test("a final write failure cannot authorize a batch from stale complete results
 	const { pairs } = JSON.parse(await readFile(join(f.directories[0], "results.json"), "utf8"));
 	assert.equal(pairs[0].status, "complete"); // The failed rewrite left an old summary.
 	assert.equal(await runEval(parseEvalArgs(["--batch", "--pilot-manifest", join(f.directories[0], "manifest.json")]), f.dependencies), 2);
-	assert.equal(f.loads, 1); assert.equal(f.arms.length, 2);
+	assert.equal(f.loads, 1); assert.equal(f.arms.length, 2); // Stage B never starts after the A write failure.
 });
 
 test("provider errors keep incomplete evidence, return exit 2 and close arms", async t => {
