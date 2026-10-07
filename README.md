@@ -74,13 +74,13 @@ The model decides when to search.
 From npm:
 
 ```sh
-pi install npm:@rochecompaan/pi-context-paging@0.3.5
+pi install npm:@rochecompaan/pi-context-paging@0.3.6
 ```
 
 From the GitHub release tag:
 
 ```sh
-pi install git:github.com/rochecompaan/pi-context-paging@v0.3.5
+pi install git:github.com/rochecompaan/pi-context-paging@v0.3.6
 ```
 
 After installation, restart Pi.
@@ -296,6 +296,13 @@ A successful manual compaction resets the cut point.
 
 Read [the architecture document](docs/architecture.md) for module and lifecycle details.
 
+## Changes in 0.3.6
+
+- The repository adds a development-only recall harness with fresh baseline and paging conversations before and after native compaction.
+- The README records the preliminary pilot results and links to the evaluation guide.
+- Evaluation code and private run artifacts stay outside the npm package.
+- Production paging code is unchanged from 0.3.5.
+
 ## Changes in 0.3.5
 
 - Paging removes the calibrated token cost of consumed recovery results when it removes those results from a request.
@@ -402,7 +409,7 @@ pi update --extensions
 Remove the package:
 
 ```sh
-pi remove npm:@rochecompaan/pi-context-paging@0.3.5
+pi remove npm:@rochecompaan/pi-context-paging@0.3.6
 ```
 
 ## License
