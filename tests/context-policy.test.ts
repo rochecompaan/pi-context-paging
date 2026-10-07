@@ -129,6 +129,22 @@ test("keeps measured within-budget input despite a larger heuristic", () => {
 	assert.deepEqual(selection.messages, messages);
 });
 
+test("falls back from invalid message weights without rejecting measured within-budget input", () => {
+	for (const tokenEstimates of [
+		{ residentTokens: Number.NaN, messageTokens: [1] },
+		{ residentTokens: 50, messageTokens: [] },
+		{ residentTokens: 50, messageTokens: [Number.POSITIVE_INFINITY] },
+		{ residentTokens: 50, messageTokens: [-1] },
+	]) {
+		const selection = selectContext({
+			messages: [user("active request")], systemPrompt: "resident prompt", activeTools: [],
+			modelContextWindow: 1_000, tokenBudget: 500, contextTokens: 100, tokenEstimates,
+		});
+		assert.equal(selection.mode, "within-budget");
+		assert.equal(selection.estimatedTokens, 100);
+	}
+});
+
 test("keeps a persistent request with its outgoing-only instruction", () => {
 	const old = user(repeat("old", 1_000));
 	const actual = user(repeat("actual", 800));

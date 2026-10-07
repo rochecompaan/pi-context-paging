@@ -1,5 +1,6 @@
 import { estimateTokens } from "@earendil-works/pi-coding-agent";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import { calibrateResponse, type ContextTokenEstimates, type ResponseCalibration } from "./context-calibration.ts";
 
 type SnapshotMessage = {
 	message: AgentMessage;
@@ -15,6 +16,7 @@ type SelectedRequest = {
 
 type ResponseAnchor = SelectedRequest & {
 	response: SnapshotMessage;
+	calibration?: ResponseCalibration;
 };
 
 function validUsageTokens(value: unknown): value is number {
@@ -51,6 +53,10 @@ function stableValue(value: unknown): unknown {
 export class ContextUsageTracker {
 	private pending: SelectedRequest | undefined;
 	private anchor: ResponseAnchor | undefined;
+	private residentOverhead: number | undefined;
+	private preparedTokenEstimates: ContextTokenEstimates | undefined;
+	/** Valid only for the original messages of the latest successful prepare(). */
+	get tokenEstimates(): ContextTokenEstimates | undefined { return this.preparedTokenEstimates; }
 	private readonly fingerprints = new WeakMap<AgentMessage, string>();
 	private readonly estimates = new WeakMap<AgentMessage, number>();
 
@@ -60,6 +66,7 @@ export class ContextUsageTracker {
 		contextTokens: unknown,
 		persistentMessages?: readonly AgentMessage[],
 	): number | undefined {
+		this.preparedTokenEstimates = undefined;
 		if (!validUsageTokens(contextTokens) || !this.anchor || !Number.isFinite(residentTokens) || residentTokens < 0) return undefined;
 		const persistent = persistentMessages ?? messages;
 		let persistentResponseIndex = persistent.length - 1;
@@ -87,7 +94,14 @@ export class ContextUsageTracker {
 				- this.anchor.response.tokens
 				+ residentTokens
 				- this.anchor.residentTokens;
-			return Number.isFinite(estimate) ? Math.max(0, estimate) : undefined;
+			if (!Number.isFinite(estimate)) return undefined;
+			const calibration = this.anchor.calibration;
+			if (!calibration || contextTokens - persistentTailTokens !== usageTokens(this.anchor.response.message)) {
+				return Math.max(0, estimate);
+			}
+			const messageTokens = this.calibratedMessages(current, responseIndex, calibration.messageScale);
+			this.preparedTokenEstimates = { residentTokens: residentTokens + calibration.residentOverheadTokens, messageTokens };
+			return Math.max(0, estimate);
 		}
 		return undefined;
 	}
@@ -107,8 +121,14 @@ export class ContextUsageTracker {
 
 	recordResponse(message: AgentMessage): void {
 		if (!this.pending) return;
-		if (usageTokens(message) !== undefined) {
-			this.anchor = { ...this.pending, response: this.snapshot([message], [message])[0]! };
+		const reportedTokens = usageTokens(message);
+		if (reportedTokens !== undefined) {
+			const response = this.snapshot([message], [message])[0]!;
+			const calibration = calibrateResponse(this.pending.residentTokens,
+				this.tokens(this.pending.messages) + response.tokens, reportedTokens, this.residentOverhead,
+				this.tokens(this.pending.messages.filter(({ persistent }) => !persistent)));
+			this.residentOverhead = calibration?.residentOverheadTokens ?? 0;
+			this.anchor = { ...this.pending, response, calibration };
 		}
 		this.pending = undefined;
 	}
@@ -116,6 +136,25 @@ export class ContextUsageTracker {
 	clear(): void {
 		this.pending = undefined;
 		this.anchor = undefined;
+		this.residentOverhead = undefined;
+		this.preparedTokenEstimates = undefined;
+	}
+
+	private calibratedMessages(current: readonly SnapshotMessage[], responseIndex: number, scale: number) {
+		const messageTokens = current.map(({ tokens }) => tokens);
+		let cursor = responseIndex - 1;
+		// Match backwards so restored identical prefixes keep their local cost.
+		// snapshotMatches already proves that this ordered subsequence exists.
+		for (let index = this.anchor!.messages.length - 1; index >= 0; index--) {
+			const saved = this.anchor!.messages[index]!;
+			// Transient notices and instructions keep their local cost.
+			if (!saved.persistent) continue;
+			while (current[cursor]!.fingerprint !== saved.fingerprint || !current[cursor]!.persistent) cursor--;
+			messageTokens[cursor] = saved.tokens * scale;
+			cursor--;
+		}
+		messageTokens[responseIndex] = this.anchor!.response.tokens * scale;
+		return messageTokens;
 	}
 
 	private snapshot(messages: readonly AgentMessage[], persistentMessages = messages): SnapshotMessage[] {

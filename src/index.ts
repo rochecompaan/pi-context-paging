@@ -12,6 +12,7 @@ import { ContextCutState } from "./context-cut.ts";
 import { isPagingToolTurn, projectActiveBranch, type HistoryItem } from "./history.ts";
 import { HistoryNavigator } from "./navigator.ts";
 import { registerContextPagingTools, type HistorySnapshot } from "./tools.ts";
+import { contextPagingStats, reportedInputTokens, type InputTokenCount } from "./stats.ts";
 
 import {
 	resolveContextPagingSettings,
@@ -71,18 +72,25 @@ export default function contextPagingExtension(
 	let resolvedSettings: ResolvedContextPagingSettings = settingsSources
 		? resolveContextPagingSettings(settingsSources)
 		: resolveContextPagingSettings({ globalSettings: { contextPaging: { enabled: false } }, projectTrusted: false });
+	let sessionEnabled: boolean | undefined;
+	const isEnabled = () => sessionEnabled ?? resolvedSettings.enabled;
+	const publishStatus = (ctx: ExtensionContext) => {
+		if (ctx.hasUI) ctx.ui.setStatus("context-paging", isEnabled() ? "paging on" : "paging off");
+	};
 	let allItems: HistoryItem[] = [];
 	const navigator = new HistoryNavigator();
 	const usageTracker = new ContextUsageTracker();
 	const cutState = new ContextCutState();
+	let latestInput: InputTokenCount | undefined;
 	const warnedSettingPairs = new Set<string>();
 	const resetPagingState = () => {
 		usageTracker.clear();
 		cutState.reset();
+		latestInput = undefined;
 	};
 	const warnAboutTrimTarget = (ctx: ExtensionContext) => {
-		const { enabled, tokenBudget, trimToTokens, trimToTokensExplicit } = resolvedSettings;
-		if (!enabled || !trimToTokensExplicit || trimToTokens < tokenBudget) return;
+		const { tokenBudget, trimToTokens, trimToTokensExplicit } = resolvedSettings;
+		if (!isEnabled() || !trimToTokensExplicit || trimToTokens < tokenBudget) return;
 		const pair = `${tokenBudget}:${trimToTokens}`;
 		if (warnedSettingPairs.has(pair)) return;
 		warnedSettingPairs.add(pair);
@@ -130,22 +138,56 @@ export default function contextPagingExtension(
 		}
 	};
 
+	pi.registerCommand("context-paging", {
+		description: "Enable or disable context paging for this session, or show status and stats",
+		handler: async (args, ctx) => {
+			const action = args.trim();
+			if (action === "stats") {
+				try {
+					ctx.ui.notify(await contextPagingStats(ctx, isEnabled(), resolvedSettings.tokenBudget, latestInput), "info");
+				} catch (error) {
+					ctx.ui.notify(`Context paging stats are unavailable: ${errorMessage(error)}`, "warning");
+				}
+				return;
+			}
+			if (action === "on" || action === "off") {
+				const enabled = action === "on";
+				if (enabled !== isEnabled()) resetPagingState();
+				sessionEnabled = enabled;
+				publishStatus(ctx);
+			} else if (action !== "" && action !== "status") {
+				ctx.ui.notify("Usage: /context-paging [on|off|status|stats]", "warning");
+				return;
+			}
+			ctx.ui.notify(`Context paging is ${isEnabled() ? "enabled" : "disabled"} for this session.`, "info");
+		},
+	});
+
 	registerContextPagingTools(pi, {
-		isEnabled: () => resolvedSettings.enabled,
+		isEnabled,
 		snapshot,
 	});
 
 	pi.on("session_start", async (_event, ctx) => {
+		sessionEnabled = undefined;
 		resetPagingState();
 		invalidatingBranchEntries = new Set();
-		if (!settingsSources) {
-			resolvedSettings = { ...resolvedSettings, enabled: false };
-			resolvedSettings = resolveContextPagingSettings(await loadSettings(ctx));
+		try {
+			if (!settingsSources) {
+				resolvedSettings = { ...resolvedSettings, enabled: false };
+				resolvedSettings = resolveContextPagingSettings(await loadSettings(ctx));
+			}
+		} finally {
+			publishStatus(ctx);
 		}
 		refreshSafely(ctx);
 	});
+	pi.on("session_shutdown", (_event, ctx) => {
+		if (ctx.hasUI) ctx.ui.setStatus("context-paging", undefined);
+	});
 	pi.on("turn_end", (event, ctx) => {
 		usageTracker.recordResponse(event.message);
+		latestInput = reportedInputTokens(event.message) ?? (latestInput?.estimated ? latestInput : undefined);
 		refreshSafely(ctx);
 	});
 	pi.on("session_tree", (_event, ctx) => {
@@ -163,7 +205,7 @@ export default function contextPagingExtension(
 		if (id) invalidatingBranchEntries.add(id);
 	});
 	pi.on("context", (event, ctx) => {
-		if (!resolvedSettings.enabled) return;
+		if (!isEnabled()) return;
 		warnAboutTrimTarget(ctx);
 
 		let rawHistoryItems: readonly HistoryItem[] | undefined;
@@ -194,12 +236,14 @@ export default function contextPagingExtension(
 				trimToTokens: resolvedSettings.trimToTokens,
 				cutState: cutState.prepare(rawHistoryItems),
 				contextTokens,
+				tokenEstimates: usageTracker.tokenEstimates,
 				outgoingOnly,
 				rawHistoryItems,
 			});
 			// Unknown canonical provenance is an empty trusted subset, never the outgoing request.
 			usageTracker.recordSelection(selection.messages, residentTokens, canonicalSessionMessages ?? []);
 			cutState.commit(selection.cutState);
+			latestInput = { tokens: selection.estimatedTokens, estimated: true };
 			return { messages: selection.messages };
 		} catch (error) {
 			ctx.abort();
@@ -208,7 +252,7 @@ export default function contextPagingExtension(
 		}
 	});
 	pi.on("session_before_compact", async (event) => {
-		if (!resolvedSettings.enabled) return;
+		if (!isEnabled()) return;
 		if (event.reason === "threshold" || event.reason === "overflow") return { cancel: true };
 		usageTracker.clear();
 	});

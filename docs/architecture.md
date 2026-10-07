@@ -4,7 +4,7 @@
 
 Pi loads `src/index.ts` through the package manifest.
 The extension factory is the only public code seam.
-Settings and registered tools form the supported caller interface.
+Settings, the `/context-paging` command, registered tools, and the `context-paging` extension status form the supported caller interface.
 
 ## Raw branch projection
 
@@ -19,17 +19,31 @@ Failed text-only responses also remain in raw history.
 
 ## History navigation
 
-`navigator.ts` builds compact search records from projected items.
+`recovery-content.ts` creates a public recovery view without changing raw branch items.
+It permits assistant text and tool-call blocks, with provider signatures removed.
+Thinking, redacted thinking, and unknown assistant blocks become `null` slots.
+These slots preserve original assistant content indices.
+User content, tool arguments, and ordinary tool results remain exact.
+The filter does not recursively remove application-owned fields or text.
+
+`navigator.ts` builds compact search records from this public view.
+Search and previews skip the omitted slots.
 Search serializes large tool output only when a query needs it.
 The navigator caches that corpus until visible history IDs change.
 Browse uses stable history IDs and sequence numbers.
-Load returns complete items atomically.
+Load returns public items atomically.
 
 ## Exact output paging
 
-`output-pages.ts` serializes one assistant or tool-result output value.
-It returns bounded character pages and an exact next offset.
+`output-pages.ts` addresses the raw projection with original assistant indices.
+It applies the same public-block filter before serialization and rejects omitted blocks.
+Ordinary tool-result output remains exact.
+The page reader rejects recovery-tool results, including older replies that can contain serialized private data.
+It checks both the stored call name and the result name.
+
+The reader returns bounded character pages and an exact next offset for public JSON.
 It never replaces large values with a summary.
+Raw session storage and normal provider-message handling remain unchanged.
 
 ## Settings and limits
 
@@ -113,9 +127,42 @@ It subtracts the full persistent tail from Pi's status total, including system u
 Resident prompt and tool schemas contribute once. Weak caches reuse message fingerprints and estimates.
 When no valid response anchor exists, selection uses the heuristic fallback.
 Calibration uses the original incoming snapshot, before any remembered cut.
-Omitted interrupted exchanges and evicted messages reduce the estimate without losing that snapshot's provider offset.
+`context-calibration.ts` separates positive undercount into resident overhead and costs assigned to measured persistent messages.
+A single provider total cannot identify the fixed overhead exactly. The first observation allocates a proportional share to resident input.
+Later observations can lower this overhead estimate. A larger total does not raise the fixed overhead floor.
+The remaining undercount scales the measured persistent request and its successful response.
+Outgoing-only instructions and notices keep their local estimates. Restored history and new messages also keep their local estimates.
+The tracker supplies these costs in the original message order. Normalization and eviction remove each message's assigned cost.
+The selector does not transfer the removed cost to the protected request.
+When heuristics overestimate usage, the existing additive correction remains. A mismatched status total does not reuse message weights.
+These values are estimates, not exact provider token counts for the reduced request. Resident and retained-request safety checks still apply.
 The final outgoing request is recorded only after successful selection, including stateless provenance-fallback calls.
-Accounting fallback alone does not reset cut state. Part 1 leaves the existing usage tracker unchanged.
+Accounting fallback alone does not reset cut state.
+
+## Read-only session stats
+
+`stats.ts` reads all raw session entries through `getEntries()`, not the active or paged projection.
+File metadata supplies the actual saved byte count. An absent or unreadable file produces `unavailable`.
+Pi's message estimator counts saved text, summaries, and context-edit replacements across all branches.
+The estimate includes originals and replacements because the session file retains both.
+Opaque signatures and other metadata contribute to bytes, not estimated message tokens.
+
+`index.ts` records the latest successful selection estimate without changing usage calibration or cut state.
+A successful response replaces this estimate with `input + cacheRead + cacheWrite`. Output is excluded.
+Lifecycle invalidation clears the transient count. After resume, the latest saved assistant on the active branch can supply measured input.
+A compaction, branch summary, or model-change boundary prevents reuse of an older response count.
+The input row describes the latest conversation request, not the context for the next request after its response.
+
+Cache totals sum each saved usage record once across all branches.
+Records include assistant responses, tool results with usage, warming entries, compaction, and branch summaries.
+Missing, invalid, or unsafe counters make the affected total unavailable.
+Explicit zero cache counters remain zero when the record contains other measured token counts.
+A record with only zero or missing counters supplies no measurement.
+The totals describe recorded usage, not unrecorded calls or provider invoices.
+
+The command reports the effective budget, capped by the positive-finite model window. A disabled budget shows `inactive`.
+The UI notification does not enter model context or saved history.
+The stats action does not refresh navigation, reset accounting, publish footer status, or call a provider.
 
 ## Paging notices
 
@@ -133,6 +180,22 @@ When normal paging resumes, its frozen notice returns unchanged. Part 1 does not
 ## Lifecycle
 
 `index.ts` resolves global and trusted-project settings at session start.
+The `/context-paging on|off|status|stats` command keeps an optional enabled override in memory.
+No arguments show the current state. Invalid arguments show usage without changing state.
+Paging, recovery tools, trim-target warnings, and automatic-compaction cancellation use the same effective enabled state.
+An actual enabled-state change resets cut state and accounting. Repeated choices and status queries do not reset either.
+Every `session_start` clears the override before settings load, including new sessions, resumes, forks, and reloads.
+Branch navigation, model changes, and compaction do not clear the override.
+The command does not write settings or session entries.
+
+When `ctx.hasUI` is true, the extension publishes `isEnabled()` with `ctx.ui.setStatus("context-paging", text)`.
+The text is exactly `paging on` or `paging off`, without ANSI styling.
+Custom footers read the value from `footerData.getExtensionStatuses()`.
+Session start publishes the status after settings resolution.
+If settings load throws, the extension publishes the disabled fallback status. The settings error still propagates. Every `on` or `off` command publishes the effective status, including repeated choices.
+Status queries, stats queries, and invalid arguments leave the status alone.
+Session shutdown clears only this status key. Headless sessions skip these UI calls.
+
 It refreshes projected history after turns and session-tree changes.
 It reuses the navigator until the visible branch IDs change.
 The `context` event prepares usage from the original request, applies the selector, records the outgoing snapshot, and commits successful cut state.

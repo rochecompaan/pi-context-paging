@@ -3,7 +3,8 @@
 `pi-context-paging` gives Pi a rolling context window with a fixed token budget.
 When the window is full, the oldest history leaves the window.
 The stored session history does not change.
-The model gets tools to find that older history and load it again as exact text.
+The model gets tools to find that older history and load its public content again as exact text.
+Private assistant blocks remain in stored history, but recovery tools do not return them.
 The extension never summarizes history.
 
 ## The problem with compaction and handoff
@@ -59,8 +60,8 @@ This is better than compaction or handoff for these reasons:
 - **The model stays out of the dumb zone.** The extension keeps requests at or below the token budget. If you set the budget below the point where the model gets worse, the model always works with a short context.
 - **The recent context stays exact.** The newest messages and tool results stay in the window as stored.
 - **The oldest history leaves first.** The extension removes whole turns from the start of the history. It does not choose by content.
-- **Nothing is lost.** The model can search for any older item and load it again as exact text.
-- **Old detail returns on request.** A summary must guess in advance which details matter. A recovery tool returns the exact item that the model asks for.
+- **Nothing is lost from storage.** The complete session stays stored. The model can recover public content from older items as exact text.
+- **Old detail returns on request.** A summary must guess in advance which details matter. A recovery tool returns the exact public content that the model asks for.
 - **There is no surprise compaction.** The extension cancels automatic compaction while it is enabled. You can still compact by hand.
 
 One behavior is different from compaction.
@@ -73,13 +74,13 @@ The model decides when to search.
 From npm:
 
 ```sh
-pi install npm:@rochecompaan/pi-context-paging@0.2.1
+pi install npm:@rochecompaan/pi-context-paging@0.3.5
 ```
 
 From the GitHub release tag:
 
 ```sh
-pi install git:github.com/rochecompaan/pi-context-paging@v0.2.1
+pi install git:github.com/rochecompaan/pi-context-paging@v0.3.5
 ```
 
 After installation, restart Pi.
@@ -129,19 +130,104 @@ The extension keeps stable cuts, but it trims to the effective budget instead.
 It warns once for each budget and target pair in one Pi process.
 A restart can repeat the warning.
 
+## Session command
+
+Use `/context-paging` to change paging for the current session only:
+
+| Command | Effect |
+| --- | --- |
+| `/context-paging on` | Enable paging and recovery tools. |
+| `/context-paging off` | Disable paging and recovery tools. Pi uses its normal context and automatic compaction behavior. |
+| `/context-paging` or `/context-paging status` | Show whether paging is enabled or disabled. |
+| `/context-paging stats` | Show saved history size, latest request input, and whole-session cache totals. |
+
+The command does not change saved settings or stored session history.
+A state change clears the remembered cut point and token accounting.
+Repeating `on` or `off` does not clear this state.
+
+Branch navigation, model changes, and manual compaction keep the session choice.
+A new session, a resume, a fork, or an extension reload restores the saved settings.
+
+### Session stats
+
+The `stats` action is available from version 0.3.2.
+
+Run `/context-paging stats` to show a read-only report.
+These example values are illustrative:
+
+```text
+Context paging: on
+
+SESSION — complete saved history
+  Stored size          8.42 MiB
+  History tokens       ~684,230
+
+CONTEXT — latest model request
+  Input tokens         82,412
+  Paging budget        128,000   (64.4% used)
+  Model window         272,000
+
+CACHE — whole-session totals
+  Tokens read          6,421,880
+  Tokens written       384,000
+```
+
+- Stored size is the actual session-file size, including metadata. In-memory sessions have no stored-file measurement.
+- History tokens use Pi's estimates for all saved messages, summaries, and edit replacements. This includes inactive branches and paged-out history.
+- Input tokens describe the latest conversation request, not the next request after its response. The provider count includes cached input and excludes output.
+- Without complete provider usage, the latest outgoing paging selection supplies an estimate. This estimate includes the system prompt, tool definitions, and paging notice.
+- `~` marks estimates. Missing or invalid measurements show `unavailable`, not zero.
+- Cache totals include saved usage from all branches, tool results, warming calls, compaction, and branch summaries. Each saved usage record contributes once.
+- One missing cache component makes its whole-session total unavailable. An all-zero usage record is not a measurement.
+
+The effective budget never exceeds the model window. With paging off, the budget shows `inactive`.
+Cache traffic can exceed stored history because requests reuse the same input.
+These totals describe Pi's saved usage, not a provider invoice or usage that other extensions do not save.
+The stats action does not change paging state, write session entries, or call a provider.
+
+### Footer status
+
+In UI sessions, the extension publishes its effective state under the `context-paging` status key.
+The text is exactly `paging on` or `paging off`, without ANSI styling.
+Custom footers can read this value from `footerData.getExtensionStatuses()`.
+
+The status reflects saved settings at session start and the current session choice after every `on` or `off` command.
+Repeated choices also publish the status.
+If settings fail to load, the status shows `paging off`.
+Session shutdown removes the status key. Headless sessions do not call the status UI.
+
 ## Recovery tools
 
 | Tool | Purpose |
 | --- | --- |
 | `search_history` | Find compact references to history by text, file, tool, or failure state. |
 | `browse_history` | Move backward, forward, or around one history item. |
-| `load_history` | Load complete stored history items by stable ID. |
-| `read_context_output` | Read exact pages of large assistant or tool-result output. |
+| `load_history` | Load public history items by stable ID. |
+| `read_context_output` | Read exact pages of public assistant or ordinary tool-result output. |
 
-Search and browse return compact references.
-Load and read return the exact stored content.
+Search and browse return compact references to public content.
+Load and read preserve exact public text, tool-call data, and ordinary tool results.
 The tools never summarize.
 When paging is disabled, the tools refuse to run.
+
+### Private assistant content
+
+Recovery tools exclude assistant thinking blocks, redacted thinking payloads, and provider signatures.
+Search does not index these values, and previews do not show them.
+Only assistant text and tool-call blocks enter the recovery view.
+Unknown assistant block types also stay out of this view.
+
+Loaded assistant content uses `null` for each omitted block.
+These slots preserve the original array indices.
+The page reader uses those original `contentIndex` values and rejects reads of omitted blocks.
+It also rejects results from the four recovery tools, because older saved replies can contain private assistant data.
+The original history item remains the source for public output.
+
+This filter does not change stored history or the normal provider-message format.
+It does not remove matching words or fields from user text, tool arguments, or ordinary tool results.
+The filter reduces accidental internal-reasoning extraction, but provider safeguards can still reject a request.
+Previously returned private content can remain in an existing session.
+A new session avoids replay of those older tool replies.
 
 ## How the extension selects the window
 
@@ -210,6 +296,48 @@ A successful manual compaction resets the cut point.
 
 Read [the architecture document](docs/architecture.md) for module and lifecycle details.
 
+## Changes in 0.3.5
+
+- Paging removes the calibrated token cost of consumed recovery results when it removes those results from a request.
+- Positive provider undercount uses separate resident and measured-message estimates instead of one permanent offset.
+- Restored history, transient instructions, and paging notices keep their local estimates.
+- The token budget, resident checks, active request checks, and newest tool exchange protection stay unchanged.
+- Stored session history stays unchanged.
+
+## Changes in 0.3.3
+
+- Recovery tools exclude assistant thinking, redacted thinking payloads, and provider signatures from search, previews, loads, and output pages.
+- Loaded assistant content uses `null` slots for omitted blocks. Original `contentIndex` values remain unchanged.
+- Output pages reject private assistant blocks and saved recovery-tool replies that can contain older private data.
+- Public text, tool-call data, and ordinary tool results remain exact. Stored history and normal provider-message handling stay unchanged.
+- If an existing session still triggers a provider safeguard after the upgrade, start a new session. Older tool replies remain stored.
+- Provider safeguards can still reject requests. This release prevents structured private content from entering new recovery replies.
+
+## Changes in 0.3.2
+
+- `/context-paging stats` shows a read-only session report with paging on or off.
+- Saved history includes the actual file size and estimated tokens across all branches, including paged-out content.
+- Latest request input uses provider usage or a marked paging estimate. The report also shows the effective budget and model window.
+- Whole-session cache totals include saved usage from responses, tools, warming calls, compaction, and branch summaries.
+- Missing, invalid, unsafe, or default-zero measurements show `unavailable`. Measured zero cache counts remain zero.
+- Stats do not reset cuts, change paging, write history, or call a provider. Recovery and footer status stay unchanged.
+
+## Changes in 0.3.1
+
+- The `context-paging` extension status reports the effective state as plain `paging on` or `paging off` text.
+- Session start and every `on` or `off` command publish the status, including repeated choices.
+- A new session restores the saved state in the status. A settings read error publishes `paging off`.
+- Session shutdown removes the status. Headless sessions do not call the status UI.
+- Paging, recovery, and compaction behavior stay unchanged.
+
+## Changes in 0.3.0
+
+- `/context-paging on` and `/context-paging off` change paging for the current session only.
+- `/context-paging` and `/context-paging status` show the current state.
+- The command leaves saved settings and stored history unchanged.
+- A new session, a resume, a fork, or an extension reload restores saved settings. Branch navigation keeps the session choice.
+- Actual state changes clear the remembered cut point and token accounting. Repeated choices and status queries keep both.
+
 ## Changes in 0.2.1
 
 - The README now explains context paging in simple English. It describes why compaction and handoff lose recent detail, and how a bounded window keeps the model out of the dumb zone.
@@ -269,7 +397,7 @@ pi update --extensions
 Remove the package:
 
 ```sh
-pi remove npm:@rochecompaan/pi-context-paging@0.2.1
+pi remove npm:@rochecompaan/pi-context-paging@0.3.5
 ```
 
 ## License

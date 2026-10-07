@@ -183,6 +183,29 @@ test("uses Pi's totalTokens choice before rejecting malformed usage", () => {
 	}
 });
 
+test("splits positive usage across measured messages and discards stale token weights", () => {
+	const tracker = new ContextUsageTracker();
+	const request = user("x".repeat(4_000));
+	const response = assistant("y".repeat(4_000), { totalTokens: 8_400 });
+	tracker.recordSelection([request] as any, 100);
+	tracker.recordResponse(response as any);
+	const current = [structuredClone(request), structuredClone(response)];
+	assert.equal(tracker.prepare(current as any, 100, 8_400), 8_400);
+	// Local costs: 100 resident + 1,000 request + 1,000 response.
+	// Native 8,400 is four times that basis: 400 + 4,000 + 4,000.
+	assert.deepEqual(tracker.tokenEstimates, { residentTokens: 400, messageTokens: [4_000, 4_000] });
+	const restored = [structuredClone(request), ...current];
+	assert.equal(tracker.prepare(restored as any, 100, 8_400), 9_400);
+	assert.deepEqual(tracker.tokenEstimates, { residentTokens: 400, messageTokens: [1_000, 4_000, 4_000] },
+		"restored identical history must not steal the retained request's measured cost");
+	assert.equal(tracker.prepare(current as any, 100, 8_401), 8_401);
+	assert.equal(tracker.tokenEstimates, undefined, "a different status total cannot reuse native attribution");
+	tracker.prepare(current as any, 100, 8_400);
+	assert.ok(tracker.tokenEstimates);
+	tracker.clear();
+	assert.equal(tracker.tokenEstimates, undefined, "lifecycle changes clear message attribution");
+});
+
 test("does not repeatedly serialize a large selected message while matching raw history", () => {
 	const tracker = new ContextUsageTracker();
 	const selected = user("x".repeat(400_000));

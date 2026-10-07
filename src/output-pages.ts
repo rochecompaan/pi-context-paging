@@ -1,4 +1,5 @@
-import type { HistoryItem, ModelTurnHistoryItem } from "./history.ts";
+import { PAGING_TOOL_NAMES, type HistoryItem, type ModelTurnHistoryItem } from "./history.ts";
+import { publicAssistantBlock } from "./recovery-content.ts";
 
 export const MAXIMUM_OUTPUT_PAGE_CHARACTERS = 2_000;
 
@@ -61,18 +62,26 @@ function modelTurn(items: readonly HistoryItem[], historyId: string): ModelTurnH
 }
 
 function selectedOutput(turn: ModelTurnHistoryItem, input: ContextOutputReadInput): unknown {
-	const value = input.source === "assistant"
-		? turn.assistantMessage.content[input.contentIndex!]
-		: turn.toolResults.find((result) => result.toolCallId === input.toolCallId);
-	if (value === undefined) {
-		throw new Error(input.source === "assistant"
-			? `Unknown assistant content index ${input.contentIndex}.`
-			: `Unknown tool-result toolCallId ${input.toolCallId}.`);
+	if (input.source === "assistant") {
+		const stored = turn.assistantMessage.content[input.contentIndex!];
+		if (stored === undefined) throw new Error(`Unknown assistant content index ${input.contentIndex}.`);
+		const block = publicAssistantBlock(stored);
+		if (block === null) {
+			throw new Error(`Assistant content index ${input.contentIndex} is not public recovery output.`);
+		}
+		return block;
 	}
-	return value;
+	const result = turn.toolResults.find((candidate) => candidate.toolCallId === input.toolCallId);
+	if (result === undefined) throw new Error(`Unknown tool-result toolCallId ${input.toolCallId}.`);
+	// Older saved recovery replies can contain serialized private blocks.
+	const call = turn.assistantMessage.content.find((block) => block.type === "toolCall" && block.id === input.toolCallId);
+	if (PAGING_TOOL_NAMES.some((name) => name === result.toolName || (call?.type === "toolCall" && name === call.name))) {
+		throw new Error("Recovery-tool output is not available. Read the original history item instead.");
+	}
+	return result;
 }
 
-/** Reads an exact JSON page from the raw active-branch history projection. */
+/** Reads exact public JSON pages, using original active-branch block indices. */
 export function readContextOutput(
 	items: readonly HistoryItem[],
 	input: ContextOutputReadInput,

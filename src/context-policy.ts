@@ -4,6 +4,7 @@ import type { AssistantMessage, ToolResultMessage, UserMessage } from "@earendil
 import { isInterruptedAssistantMessage, type HistoryItem } from "./history.ts";
 
 import { defaultTrimToTokens } from "./settings.ts";
+import { validTokenEstimates, type ContextTokenEstimates } from "./context-calibration.ts";
 import { SelectionHistoryLookup } from "./selection-history.ts";
 import { rawCutFrontierResolves, type ContextCutFrontier, type ContextCutSnapshot, type ContextCutFallbackReason } from "./context-cut.ts";
 
@@ -25,6 +26,8 @@ export type ContextSelectionInput = {
 	trimToTokens?: number;
 	/** A provider-backed full-context estimate, when its usage basis is known. */
 	contextTokens?: number;
+	/** Provider-backed resident and per-message costs aligned with the original input. */
+	tokenEstimates?: ContextTokenEstimates;
 	/** Messages present only in this outgoing request, not the persistent session branch. */
 	outgoingOnly?: readonly boolean[];
 	rawHistoryItems?: readonly HistoryItem[];
@@ -563,15 +566,22 @@ function cutSnapshot(frontier: ContextCutFrontier, notice: UserMessage): Context
 // and budget-only fallbacks, so their atomicity and safety rules cannot drift.
 export function selectContext(input: ContextSelectionInput): ContextSelection {
 	const { budgetTokens, trimToTokens: targetTokens, modelLimit } = contextTokenLimits(input);
-	const residentTokens = residentTokenEstimate(input);
+	const contextTokens = validContextTokens(input.contextTokens) ? input.contextTokens : undefined;
+	const tokenEstimates = contextTokens !== undefined && validTokenEstimates(input.tokenEstimates, input.messages.length)
+		? input.tokenEstimates : undefined;
+	const residentTokens = tokenEstimates?.residentTokens ?? residentTokenEstimate(input);
 	const inputOutgoingOnly = input.outgoingOnly?.length === input.messages.length ? input.outgoingOnly : input.messages.map(() => false);
 	const { messages, outgoingOnly } = normalizeInterruptedExchanges(input.messages, inputOutgoingOnly);
 	const grouped = groupContext(messages, outgoingOnly);
 	const outgoing = new Map(messages.map((message, index) => [message, outgoingOnly[index]!]));
 	const cache: TokenCache = { messages: new Map(), units: new WeakMap() };
+	if (tokenEstimates) {
+		for (let index = 0; index < input.messages.length; index++) {
+			cache.messages.set(input.messages[index]!, tokenEstimates.messageTokens[index]!);
+		}
+	}
 	const rawInputEstimate = residentTokens + unitEstimate(input.messages, cache);
 	const rawFullEstimate = messages === input.messages ? rawInputEstimate : residentTokens + unitEstimate(messages, cache);
-	const contextTokens = validContextTokens(input.contextTokens) ? input.contextTokens : undefined;
 	// Never recalibrate after normalization, remembered exclusions, or a backward snap.
 	const calibration = contextTokens === undefined ? 0 : contextTokens - rawInputEstimate;
 	const calibrated = (estimate: number) => estimate + calibration;

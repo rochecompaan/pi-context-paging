@@ -12,6 +12,7 @@ const expectedFiles = [
   "README.md",
   "docs/architecture.md",
   "package.json",
+  "src/context-calibration.ts",
   "src/context-cut.ts",
   "src/context-policy.ts",
   "src/context-usage.ts",
@@ -19,8 +20,10 @@ const expectedFiles = [
   "src/index.ts",
   "src/navigator.ts",
   "src/output-pages.ts",
+  "src/recovery-content.ts",
   "src/selection-history.ts",
   "src/settings.ts",
+  "src/stats.ts",
   "src/tools.ts",
 ].sort();
 const requiredTools = [
