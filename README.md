@@ -74,13 +74,13 @@ The model decides when to search.
 From npm:
 
 ```sh
-pi install npm:@rochecompaan/pi-context-paging@0.3.6
+pi install npm:@rochecompaan/pi-context-paging@0.3.7
 ```
 
 From the GitHub release tag:
 
 ```sh
-pi install git:github.com/rochecompaan/pi-context-paging@v0.3.6
+pi install git:github.com/rochecompaan/pi-context-paging@v0.3.7
 ```
 
 After installation, restart Pi.
@@ -304,6 +304,15 @@ A successful manual compaction resets the cut point.
 
 Read [the architecture document](docs/architecture.md) for module and lifecycle details.
 
+## Changes in 0.3.7
+
+- Search matches public text after newlines and ignores punctuation around identifiers.
+- Loaded searches retain unloaded matches in `references` and `unloadedHistoryIds`, with at most three loaded items per call.
+- The recall harness restores each question into a separate conversation so that earlier answers cannot influence later probes.
+- Reports separate token use, cache use, catalog cost estimates, response time, and total task time.
+- Offline restoration tests and explicit approvals guard live pilots and batches.
+- The README records the isolated-probe pilot results. Evaluation code and private artifacts stay outside the npm package.
+
 ## Changes in 0.3.6
 
 - The repository adds a development-only recall harness with fresh baseline and paging conversations before and after native compaction.
@@ -401,10 +410,38 @@ npm run bench
 
 ## Recall evaluation
 
-The development-only [recall harness](docs/evals/full-budget-recall.md) compares baseline Pi with paging in fresh conversations.
-One pilot at [`fda59ef`](https://github.com/rochecompaan/pi-context-paging/commit/fda59ef60429c439dd004167452158f3567e4d63) scored paging at 4/5 known facts per stage.
-Baseline scored 5/5 before native compaction and 0/5 afterward.
-Paging missed both revised decisions. These results are preliminary.
+The development-only [recall harness](docs/evals/full-budget-recall.md) compares baseline Pi with paging.
+Stages A and B use separate source conversations.
+Each question runs in its own restored conversation, so that sibling probes cannot share answers or recovery results.
+The harness records token use, cache use, catalog cost estimates, response time, and total task time.
+Catalog estimates are not billed costs.
+
+From a source checkout, run the offline preview after `npm ci`:
+
+```sh
+npm run eval:recall -- --dry-run
+```
+
+The preview sends no provider requests.
+Live pilots and batches each require separate user approval.
+Read the evaluation guide for preparation, limits, and result interpretation.
+
+The isolated-probe pilot on October 7, 2026 used `openai-codex/gpt-6-luna` with `xhigh` reasoning.
+Its native context window was 272,000 tokens. Paging used a 128,000-token budget and an 80,000-token trim target.
+The harness source tree is included in [`f10f216`](https://github.com/rochecompaan/pi-context-paging/commit/f10f2161a8e9c868fd8dc9474b0acab288293bb4).
+
+| Stage | Baseline known facts | Paging known facts |
+| --- | --- | --- |
+| A: before baseline compaction | 5/5 | 5/5 |
+| B: after baseline compaction | 0/5 | 5/5 |
+
+All 24 probe forks finished, both stage gates passed, and all four unknown controls passed.
+Each correct paging answer had matching recovery-tool evidence, including both revised decisions.
+
+These results are preliminary. One matched pair per stage does not establish general recall, speed, or cost advantages.
+Sibling probes share source preparation and are not independent session samples.
+The harness does not inspect opaque model reasoning.
+Earlier shared-probe scores are not directly comparable with this isolated-probe pilot.
 
 ## Upgrade and removal
 
@@ -417,7 +454,7 @@ pi update --extensions
 Remove the package:
 
 ```sh
-pi remove npm:@rochecompaan/pi-context-paging@0.3.6
+pi remove npm:@rochecompaan/pi-context-paging@0.3.7
 ```
 
 ## License
