@@ -1,10 +1,12 @@
 import { PAGING_TOOL_NAMES } from "../../src/history.ts";
-import type { RequestEvidence } from "./codex-payload.ts";
+import { sameOwner, type SessionOwner } from "./metrics.ts";
+import type { ReadableBlock, RequestEvidence, RequestMeta } from "./codex-payload.ts";
 import type { ProbeScore } from "./scoring.ts";
 import type { FactVersion, Probe } from "./workload.ts";
 
 export type Visibility = "resident-original" | "resident-summary" | "resident-other" | "plaintext-absent" | "unclassified";
-export type RecoveryResult = {
+export type ObservedToolCall = RequestMeta & { toolCallId: string; toolName: string; eventIndex: number };
+export type RecoveryResult = SessionOwner & {
 	promptId: string;
 	requestId: string;
 	toolCallId: string;
@@ -19,6 +21,7 @@ export type ProbeEvidenceInput = {
 	initial: RequestEvidence;
 	followUps: readonly RequestEvidence[];
 	recoveryResults: readonly RecoveryResult[];
+	observedCalls?: readonly ObservedToolCall[];
 	score: ProbeScore;
 	finalAnswerEventIndex: number;
 };
@@ -63,6 +66,13 @@ function visibility(input: ProbeEvidenceInput, fact: FactVersion): Visibility {
 	return "plaintext-absent";
 }
 
+/** The native Responses adapter represents a call as call_id|item_id. */
+function sameToolIdentity(block: ReadableBlock, nativeId: string): boolean {
+	if (block.toolCallId === nativeId) return true;
+	const [callId, itemId, ...extra] = nativeId.split("|");
+	return extra.length === 0 && !!itemId && block.toolCallId === callId && block.toolItemId === itemId;
+}
+
 export function analyzeProbe(input: ProbeEvidenceInput): ProbeEvidence {
 	const opaqueReasoningPresent = input.initial.opaque.count > 0;
 	const fact = input.fact;
@@ -73,11 +83,16 @@ export function analyzeProbe(input: ProbeEvidenceInput): ProbeEvidence {
 	const requests = [input.initial, ...input.followUps];
 	const sourceExcluded = !input.initial.blocks.some(block => block.role === "user" && block.sourcePromptId === fact.sourcePromptId);
 	const qualified = label === "plaintext-absent" && sourceExcluded && requests.every(request => request.complete
-		&& request.promptId === input.probe.step.id && request.purpose === "conversation" && request.arm === input.initial.arm);
+		&& request.promptId === input.probe.step.id && request.purpose === "conversation" && sameOwner(request, input.initial));
 	const recovered = input.recoveryResults.some(result => !result.isError && result.toolCallId.length > 0
 		&& result.eventIndex >= 0 && result.eventIndex < input.finalAnswerEventIndex
 		&& result.promptId === input.probe.step.id
-		&& requests.some(request => request.requestId === result.requestId)
+		&& sameOwner(result, input.initial)
+		&& requests.some(request => request.requestId === result.requestId && sameOwner(request, result))
+		&& input.observedCalls?.some(call => sameOwner(call, result) && call.requestId === result.requestId
+			&& call.promptId === result.promptId && call.toolCallId === result.toolCallId && call.toolName === result.toolName
+			&& call.eventIndex >= 0 && call.eventIndex <= result.eventIndex)
+		&& requests.some(request => request.blocks.some(block => block.kind === "tool-call" && sameToolIdentity(block, result.toolCallId) && block.text === result.toolName))
 		&& PAGING_TOOL_NAMES.some(name => name === result.toolName) && matchFact(fact, [result.text]) === "match");
 	return { probeId: input.probe.id, visibility: label, opaqueReasoningPresent,
 		qualified, recoverySuccess: qualified && recovered && input.score.correct };

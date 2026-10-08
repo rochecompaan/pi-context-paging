@@ -1,8 +1,10 @@
-import { analyzeProbe, matchFact, type ProbeEvidence } from "./evidence.ts";
+import { analyzeProbe, type ProbeEvidence } from "./evidence.ts";
 import { scoreAnswer, type ProbeScore } from "./scoring.ts";
 import { factForProbe, type Arm, type Probe, type Stage, type Workload } from "./workload.ts";
 import type { ArmSnapshot } from "./pi-arm.ts";
 import type { RequestEvidence } from "./codex-payload.ts";
+import { sameOwner } from "./metrics.ts";
+import { readableAnswerMatch } from "./probe-gate.ts";
 
 export type ProbeArmResult = { score: ProbeScore; evidence: ProbeEvidence; latencyMs: number; traceComplete: boolean };
 export type PairProbe = { probe: Probe; baseline: ProbeArmResult; paging: ProbeArmResult; comparisonEligible: boolean };
@@ -23,15 +25,26 @@ export function latestConversation(snapshot: ArmSnapshot | undefined): RequestEv
 export function sourceExcluded(request: RequestEvidence | undefined, sourcePromptId: string): boolean {
 	return !!request?.complete && !request.blocks.some(block => block.role === "user" && block.sourcePromptId === sourcePromptId);
 }
-export function stageOpportunity(stage: Stage, workload: Workload, snapshots: Snapshots): boolean {
+/** Observed candidate boundary: all five targets and every supplied source version. */
+export function checkpointOpportunity(workload: Workload, stage: Stage, snapshots: Snapshots): {
+	ready: boolean; qualifiedKnown: number; reason: string | null;
+} {
 	const paging = latestConversation(snapshots.paging), baseline = latestConversation(snapshots.baseline);
-	if (!paging?.complete || !baseline?.complete) return false;
-	const known = workload.probes[stage].filter(probe => probe.factId);
-	if (stage === "A") return !successfulCompactions(snapshots.baseline) && known.filter(probe => {
-		const fact = factForProbe(workload, probe)!;
-		return sourceExcluded(paging, fact.sourcePromptId) && matchFact(fact, paging.blocks.map(block => block.text)) === "none";
-	}).length >= 4;
-	return successfulCompactions(snapshots.baseline) > 0 && known.every(probe => sourceExcluded(baseline, factForProbe(workload, probe)!.sourcePromptId));
+	const fail = (reason: string, qualifiedKnown = 0) => ({ ready: false, qualifiedKnown, reason });
+	if (!paging?.complete || !baseline?.complete || !snapshots.paging || !snapshots.baseline
+		|| !sameOwner(paging, snapshots.paging.owner) || !sameOwner(baseline, snapshots.baseline.owner)) return fail("candidate-evidence-incomplete");
+	const known = workload.probes[stage].filter(probe => probe.factId !== null);
+	const qualifiedKnown = known.filter(probe => workload.facts.filter(fact => fact.factId === probe.factId)
+		.every(fact => sourceExcluded(paging, fact.sourcePromptId)
+			&& snapshots.paging!.origins.some(origin => origin.sourcePromptId === fact.sourcePromptId))
+		&& readableAnswerMatch(factForProbe(workload, probe)!, paging.blocks.map(block => block.text)) === "none").length;
+	if (stage === "A" && successfulCompactions(snapshots.baseline)) return fail("baseline-compacted-before-stage-A", qualifiedKnown);
+	if (qualifiedKnown !== 5 || known.length !== 5) return fail("paging-targets-not-excluded", qualifiedKnown);
+	if (stage === "B" && (!successfulCompactions(snapshots.baseline) || known.some(probe => workload.facts
+		.filter(fact => fact.factId === probe.factId).some(fact => !sourceExcluded(baseline, fact.sourcePromptId))))) {
+		return fail("baseline-native-boundary-not-ready", qualifiedKnown);
+	}
+	return { ready: true, qualifiedKnown, reason: null };
 }
 
 export function scoreProbeArm(workload: Workload, probe: Probe, snapshot: ArmSnapshot, before: ArmSnapshot): ProbeArmResult {
@@ -42,28 +55,6 @@ export function scoreProbeArm(workload: Workload, probe: Probe, snapshot: ArmSna
 		purpose: "conversation" as const, complete: false, blocks: [], opaque: { count: 0, hashes: [] } };
 	return { score, latencyMs: snapshot.latencyMs - before.latencyMs, traceComplete: requests.length > 0 && requests.every(request => request.complete),
 		evidence: analyzeProbe({ probe, fact, initial, followUps: requests.slice(1), recoveryResults: snapshot.recoveryResults,
+			observedCalls: snapshot.toolCalls,
 			score, finalAnswerEventIndex: snapshot.finalAnswerEventIndex }) };
-}
-
-export function exposures(workload: Workload, probe: Probe, snapshots: Snapshots, result: PairProbe): string[] {
-	if (probe.stage !== "A") return [];
-	const texts = (["baseline", "paging"] as const).flatMap(arm => [snapshots[arm]!.finalAnswerText, result[arm].score.actual ?? "",
-		...snapshots[arm]!.recoveryResults.filter(event => event.promptId === probe.step.id && !event.isError).map(event => event.text)]);
-	return [...new Set(workload.facts.filter(fact => fact.factId.startsWith("B-") && matchFact(fact, texts) === "match").map(fact => fact.factId))];
-}
-export function finishStage(stage: StageResult, workload: Workload, snapshots: Snapshots, exposure: ReadonlySet<string>): void {
-	stage.complete = stage.probes.length === workload.probes[stage.stage].length;
-	stage.qualifiedKnown = stage.probes.filter(probe => probe.probe.factId && probe.paging.evidence.qualified).length;
-	if (!stage.complete) stage.reason ??= "stage-not-completed";
-	else if (stage.stage === "A" && stage.timing.some(time => time.baselineCompactionsAfter > 0)) stage.reason = "baseline-compacted-during-stage-A";
-	else if (stage.probes.some(probe => !probe.baseline.traceComplete || !probe.paging.traceComplete)) stage.reason = "missing-trace-evidence";
-	else if (stage.stage === "A" && stage.qualifiedKnown < 4) stage.reason = "insufficient-qualified-known-probes";
-	else if (stage.stage === "B" && !successfulCompactions(snapshots.baseline)) stage.reason = "no-successful-baseline-compaction";
-	else if (stage.stage === "B" && stage.probes.some(probe => {
-		const fact = factForProbe(workload, probe.probe);
-		const initial = snapshots.baseline!.requests.find(request => request.promptId === probe.probe.step.id && request.purpose === "conversation");
-		return fact && !sourceExcluded(initial, fact.sourcePromptId);
-	})) stage.reason = "baseline-source-still-resident";
-	else if (stage.stage === "B" && exposure.size > 0) stage.reason = "cross-stage-exposure";
-	stage.valid = stage.complete && stage.reason === null;
 }

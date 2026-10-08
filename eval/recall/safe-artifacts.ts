@@ -1,8 +1,10 @@
+import { ownedDiagnostic, safeDiagnostic } from "./safe-diagnostics.ts";
 const privateFields = new Set([
 	"authorization", "proxyauthorization", "headers", "requestheaders", "responseheaders", "cookie", "cookies",
 	"setcookie", "apikey", "accesskey", "secretkey", "accesstoken", "refreshtoken", "idtoken", "token",
 	"credential", "credentials", "credentialresolution", "auth", "authentication", "authstorage",
 	"environment", "env", "encryptedcontent", "thinkingsignature", "signature", "secret", "password", "errormessage", "stack", "stacktrace", "rawerror",
+	"privatecheckpoint", "checkpointdata", "checkpointhandle", "checkpointdigest", "privatedigest", "tape", "replaytape", "rawproviderbody", "rawbody",
 ]);
 const modelFields = new Set(["provider", "id", "api", "contextWindow", "maxTokens", "cost", "reasoning", "thinkingLevelMap"]);
 const costFields = new Set(["input", "output", "cacheRead", "cacheWrite", "total", "tiers"]);
@@ -34,16 +36,18 @@ export function safeError(error: unknown): { name: string; code?: string } {
 /** Copy structured artifacts, never credential resolution objects or raw errors. */
 export function sanitizeArtifact(value: unknown): unknown {
 	const ancestors = new WeakSet<object>();
-	function copy(current: unknown, field = ""): unknown {
+	function copy(current: unknown, field = "", parentField = ""): unknown {
+		if (field === "reason" || field === "failureCode") return safeDiagnostic(current);
 		if (typeof current === "string" && field === "error") return current.split(",").every(code => diagnosticCodes.has(code)) ? current : { name: "Error" };
 		if (current === null || typeof current === "string" || typeof current === "boolean") return current;
 		if (typeof current === "number") return Number.isFinite(current) ? current : null;
 		if (!current || typeof current !== "object") return null;
 		if (ancestors.has(current)) return "[Circular]";
 		if (current instanceof Error) return safeError(current);
+		if (typeof (current as { toJSON?: unknown }).toJSON === "function") return null;
 		if ((field === "error" || field === "errors") && !Array.isArray(current)) {
 			const error = current as Record<string, unknown>;
-			if (typeof error.code === "string" && scopedErrorCodes.has(error.code)) return {
+			if (typeof error.code === "string" && (scopedErrorCodes.has(error.code) || ownedDiagnostic(error.code))) return {
 				code: error.code, ...(error.arm === "baseline" || error.arm === "paging" ? { arm: error.arm } : {}),
 				...(typeof error.promptId === "string" || error.promptId === null ? { promptId: error.promptId } : {}),
 			};
@@ -51,13 +55,16 @@ export function sanitizeArtifact(value: unknown): unknown {
 		}
 		ancestors.add(current);
 		let result: unknown;
-		if (Array.isArray(current)) result = current.map(item => copy(item, field));
-		else {
-			const allowed = field === "modelMetadata" ? modelFields : field === "cost" ? costFields
+		if (Array.isArray(current)) result = current.map(item => copy(item, field, parentField));
+		else if (field === "checks") {
+			const check = current as Record<string, unknown>;
+			result = { name: safeDiagnostic(check.name), passed: check.passed === true };
+		} else {
+			const allowed = field === "modelMetadata" ? modelFields : field === "cost" && ["modelMetadata", "usage"].includes(parentField) ? costFields
 				: field === "tiers" ? tierFields : field === "thinkingLevelMap" ? thinkingFields : null;
 			result = Object.fromEntries(Object.entries(current).filter(([key]) =>
 				!privateFields.has(key.toLowerCase().replace(/[-_]/g, "")) && (!allowed || allowed.has(key)))
-				.map(([key, item]) => [key, copy(item, key)]));
+				.map(([key, item]) => [key, copy(item, key, field)]));
 		}
 		ancestors.delete(current);
 		return result;

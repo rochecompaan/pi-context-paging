@@ -54,7 +54,8 @@ type SearchDocument = {
 };
 
 function tokenize(text: string): string[] {
-	return text.toLowerCase().match(/\p{Script=Han}|[\p{L}\p{N}_./:-]+/gu) ?? [];
+	const terms = text.toLowerCase().match(/\p{Script=Han}|[\p{L}\p{N}_./:-]+/gu) ?? [];
+	return terms.map((term) => term.replace(/^[./:-]+|[./:-]+$/g, "")).filter(Boolean);
 }
 
 function serialized(value: unknown): string {
@@ -62,12 +63,20 @@ function serialized(value: unknown): string {
 	return result === undefined ? "" : result;
 }
 
+function contentText(content: unknown): string {
+	if (typeof content === "string") return content;
+	if (!Array.isArray(content)) return serialized(content);
+	return content.flatMap((block) => {
+		if (block === null) return [];
+		if (typeof block === "object" && block.type === "text" && typeof block.text === "string") {
+			return [block.text];
+		}
+		return [serialized(block)];
+	}).join(" ");
+}
+
 function itemText(item: RecoveryHistoryItem): string {
-	if (item.kind === "user") {
-		return typeof item.userMessage.content === "string"
-			? item.userMessage.content
-			: serialized(item.userMessage.content);
-	}
+	if (item.kind === "user") return contentText(item.userMessage.content);
 
 	const toolCalls = item.assistantMessage.content.flatMap((block) => {
 		if (typeof block !== "object" || block === null
@@ -78,23 +87,17 @@ function itemText(item: RecoveryHistoryItem): string {
 	});
 	const fileSegments = item.metadata.files.flatMap((file) => file.split(/[\\/]/));
 	return [
-		serialized(item.assistantMessage.content.filter((block) => block !== null)),
+		contentText(item.assistantMessage.content),
 		...toolCalls.flatMap((call) => [call.name, serialized(call.arguments)]),
-		...item.toolResults.map((result) => serialized(result.content)),
+		...item.toolResults.map((result) => contentText(result.content)),
 		...item.metadata.files,
 		...fileSegments,
 	].join(" ");
 }
 
 function previewFor(item: RecoveryHistoryItem): string {
-	if (item.kind === "user") {
-		const content = item.userMessage.content;
-		return (typeof content === "string" ? content : serialized(content)).replace(/\s+/g, " ").trim().slice(0, 160);
-	}
-	const content = item.assistantMessage.content.flatMap((block) =>
-		block === null ? [] : [block.type === "text" ? block.text : serialized(block)],
-	).join(" ");
-	return content.replace(/\s+/g, " ").trim().slice(0, 160);
+	const content = item.kind === "user" ? item.userMessage.content : item.assistantMessage.content;
+	return contentText(content).replace(/\s+/g, " ").trim().slice(0, 160);
 }
 
 function buildReference(item: RecoveryHistoryItem, index: number, items: readonly RecoveryHistoryItem[]): HistoryReference {

@@ -1,13 +1,14 @@
 import type { RequestMeta } from "./codex-payload.ts";
 import type { Clock } from "./pi-arm.ts";
 import type { Arm } from "./workload.ts";
+import { sameOwner, type SessionOwner } from "./metrics.ts";
 
 export type EvalLimits = { maxUserPrompts: number; maxRequestsPerPrompt: number; maxRequestsPerArm: number; maxPairMinutes: number };
 export const defaultLimits: Readonly<EvalLimits> = Object.freeze({
 	maxUserPrompts: 64, maxRequestsPerPrompt: 12, maxRequestsPerArm: 256, maxPairMinutes: 120,
 });
 export type RequestGuard = {
-	beginPrompt(arm: Arm, promptId: string): void;
+	beginPrompt(arm: Arm, promptId: string, owner?: SessionOwner): void;
 	beforeAttempt(meta: RequestMeta): void;
 	check(): void;
 	stop(reason: string): void;
@@ -29,6 +30,7 @@ export function createRequestGuard(limits: EvalLimits, clock: Clock): RequestGua
 	const sent = { baseline: 0, paging: 0 }, prompts = { baseline: 0, paging: 0 };
 	const perPrompt = new Map<string, number>();
 	const current: Partial<Record<Arm, string>> = {};
+	const owners: Partial<Record<Arm, SessionOwner>> = {};
 	let stopped: string | null = null;
 	const stop = (reason: string) => { stopped ??= reason; };
 	const reject = (reason: string): never => { stop(reason); throw new Error(`Eval stopped: ${stopped}`); };
@@ -40,17 +42,20 @@ export function createRequestGuard(limits: EvalLimits, clock: Clock): RequestGua
 		get sentAttempts() { return { ...sent }; },
 		get promptCounts() { return { ...prompts }; },
 		get stopReason() { return stopped; }, stop, check,
-		beginPrompt(arm, promptId) {
+		beginPrompt(arm, promptId, owner) {
 			check();
+			if (owner && (owner.arm !== arm || !sameOwner(owner, owner))) reject("request-owner-mismatch");
 			if (prompts[arm] >= limits.maxUserPrompts) reject("max-user-prompts");
 			const key = JSON.stringify([arm, promptId]);
 			if (perPrompt.has(key)) reject("duplicate-prompt");
 			prompts[arm]++;
 			current[arm] = promptId;
+			if (owner) owners[arm] = { ...owner }; else delete owners[arm];
 			perPrompt.set(key, 0);
 		},
 		beforeAttempt(meta) {
 			check();
+			if (owners[meta.arm] && !sameOwner(owners[meta.arm]!, meta)) reject("request-owner-mismatch");
 			if (current[meta.arm] !== meta.promptId) reject("unbound-request");
 			const key = JSON.stringify([meta.arm, meta.promptId]), count = perPrompt.get(key)!;
 			if (count >= limits.maxRequestsPerPrompt) reject("max-requests-per-prompt");

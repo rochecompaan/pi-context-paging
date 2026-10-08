@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { prepareCodexRuntime } from "./codex-runtime.ts";
 import { createPiArm } from "./pi-arm.ts";
-import { runPair } from "./pair.ts";
+import { runStageGroup } from "./stage-group.ts";
 import type { LiveEval } from "./cli.ts";
 
 /** Imported only after the entry-point checkout has passed source verification. */
@@ -21,15 +21,21 @@ export async function loadLiveEval(): Promise<LiveEval> {
 	const noInference = (): never => { throw new Error("Preflight cannot dispatch inference"); };
 	const prepared = await prepareCodexRuntime(agentDir, {
 		allocateMeta: noInference, onPayload: async () => noInference(), beforeHttpAttempt: noInference,
-		onHttpAttemptEnd() {}, onUsageObservation() {},
+		onRequestStart() {}, onAttemptStart() {}, onResponseHeaders() {}, onAttemptSettled() {}, onRequestSettled() {}, onUsageObservation() {},
 	});
-	const resources = new Set<string>();
+	const resources = new Map<string, string>();
 	return {
-		modelMetadata: prepared.metadata, sdkVersion: versions[2], runPair,
+		modelMetadata: prepared.metadata, sdkVersion: versions[2], runStageGroup,
 		async createArm(options) {
-			const resourceDir = await mkdtemp(join(tmpdir(), "pi-recall-arm-")); resources.add(resourceDir);
-			return createPiArm({ ...options, agentDir, resourceDir });
+			if (resources.has(options.owner.sessionId)) throw new Error("Duplicate native session ownership");
+			const resourceDir = await mkdtemp(join(tmpdir(), "pi-recall-arm-")); resources.set(options.owner.sessionId, resourceDir);
+			try { return await createPiArm({ ...options, agentDir, resourceDir }); }
+			catch (error) { await rm(resourceDir, { recursive: true, force: true }); resources.delete(options.owner.sessionId); throw error; }
 		},
-		async cleanup() { await Promise.all([...resources].map(path => rm(path, { recursive: true, force: true }))); resources.clear(); },
+		async cleanupSession(owner) {
+			const path = resources.get(owner.sessionId);
+			if (path) { await rm(path, { recursive: true, force: true }); resources.delete(owner.sessionId); }
+		},
+		async cleanup() { await Promise.all([...resources.values()].map(path => rm(path, { recursive: true, force: true }))); resources.clear(); },
 	};
 }

@@ -1,23 +1,30 @@
+import { ownerFixture } from "./fixtures/eval-recall.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { normalizeContext, type Provider, type Model, type Api } from "@earendil-works/pi-ai";
 import { openaiCodexProvider } from "@earendil-works/pi-ai/providers/openai-codex";
 import { observeProvider, prepareCodexRuntime, type RequestHooks, type ProviderUsageObservation } from "../eval/recall/codex-runtime.ts";
 import { fixtureRuntime, makeFixtureProvider, measuredUsage, sseResponse } from "./fixtures/eval-recall-provider.ts";
+import { fixtureClock } from "./fixtures/eval-recall-clock.ts";
+import type { AttemptRecord, RequestRecord } from "../eval/recall/metrics.ts";
 
 function hooks() {
 	let requests = 0;
 	const observations: ProviderUsageObservation[] = [];
 	const events: string[] = [];
 	const payloads: unknown[] = [];
+	const attempts: AttemptRecord[] = [], requestRecords: RequestRecord[] = [];
 	const value: RequestHooks = {
-		allocateMeta: () => ({ requestId: `request-${++requests}`, promptId: "p1", arm: "baseline", purpose: "conversation" }),
+		onRequestStart: request => { requestRecords.push(request); },
+		onAttemptStart: attempt => { attempts.push(attempt); },
+		onResponseHeaders: attempt => { events.push(`status:${attempt.httpStatus}`); },
+		onAttemptSettled() {}, onRequestSettled() {},
+		allocateMeta: () => ({ ...ownerFixture("baseline"), requestId: `request-${++requests}`, promptId: "p1", arm: "baseline", purpose: "conversation" }),
 		onPayload: async (_meta, payload) => { events.push("payload"); payloads.push(payload); },
 		beforeHttpAttempt: () => { events.push("guard"); },
-		onHttpAttemptEnd: (_meta, status) => { events.push(`status:${status}`); },
 		onUsageObservation: (_meta, observation) => { observations.push(observation); },
 	};
-	return { value, events, payloads, observations };
+	return { value, events, payloads, observations, attempts, requests: requestRecords };
 }
 const native = openaiCodexProvider();
 const model = native.getModels().find(model => model.id === "gpt-6-luna")!;
@@ -73,8 +80,11 @@ test("both native stream paths compose payload callbacks and force stateless SSE
 		assert.equal(payload.instructions, "replaced");
 		assert.equal(payload.store, false);
 		assert.equal(Object.hasOwn(payload, "previous_response_id"), false);
-		assert.deepEqual(h.observations, [{ requestId: "request-1", usagePresent: true,
-			inputTokens: 100, outputTokens: 7, cachedTokens: 20, cacheWriteTokens: null }]);
+		assert.equal(h.observations.length, 1);
+		assert.deepEqual(h.observations[0], { requestId: "request-1", attemptId: "request-1-attempt-1", usagePresent: true,
+			inputTokens: 100, outputTokens: 7, cachedTokens: 20, cacheWriteTokens: null, reasoningTokens: null,
+			fieldStatus: { inputTokens: "observed", outputTokens: "observed", cachedTokens: "observed",
+				cacheWriteTokens: "not-reported", reasoningTokens: "not-reported" } });
 	}
 });
 
@@ -118,6 +128,12 @@ test("guards every actual retry dispatch without allocating another logical requ
 	assert.equal(fixture.dispatches.length, 2);
 	assert.deepEqual(h.events, ["payload", "guard", "status:500", "guard", "status:200"]);
 	assert.equal(h.observations.length, 1);
+	assert.equal(h.requests.length, 1);
+	assert.equal(h.attempts.length, 2);
+	assert.equal(h.requests[0].attempts.length, 2);
+	assert.notEqual(h.attempts[0].attemptId, h.attempts[1].attemptId);
+	assert.equal(h.attempts[0].timing.status, "failed");
+	assert.equal(h.attempts[1].timing.status, "succeeded");
 });
 
 test("an asynchronous artifact or source guard blocks dispatch before provider fetch", async () => {
@@ -129,6 +145,85 @@ test("an asynchronous artifact or source guard blocks dispatch before provider f
 	assert.equal(fixture.dispatches.length, 0);
 	assert.equal(answer.stopReason, "error");
 	assert.equal(h.observations.length, 0);
+});
+
+test("retains failed retry usage separately and includes backoff in logical request duration", async () => {
+	const h = hooks(), time = fixtureClock();
+	const first = await sseResponse({ usage: { input_tokens: 11, output_tokens: 1, input_tokens_details: { cached_tokens: 0 } } }).text();
+	const second = await sseResponse({ usage: measuredUsage }).text();
+	let guards = 0;
+	h.value.beforeHttpAttempt = () => { if (guards++ === 1) time.at(50); };
+	const fixture = await fixtureRuntime(index => {
+		time.at(index === 0 ? 3 : 53);
+		let sent = false;
+		return { response: new Response(new ReadableStream<Uint8Array>({ pull(controller) {
+			if (sent) { controller.close(); return; }
+			sent = true; time.at(index === 0 ? 19 : 80);
+			controller.enqueue(new TextEncoder().encode(index === 0 ? first : second));
+		} }, { highWaterMark: 0 }), { status: index === 0 ? 500 : 200, headers: { "Content-Type": "text/event-stream" } }) };
+	});
+	const prepared = await prepareCodexRuntime("/unused", h.value, async () => fixture.runtime, time.clock);
+	await prepared.runtime.completeSimple(prepared.model, { messages: context.messages }, { maxRetries: 1 });
+	assert.equal(h.attempts.length, 2);
+	assert.equal(h.requests.length, 1);
+	assert.equal(h.attempts[0].providerUsage.inputTokens, 11);
+	assert.equal(h.attempts[1].providerUsage.inputTokens, 100);
+	assert.equal(h.attempts[0].attemptWallMs.value, 19);
+	assert.equal(h.attempts[1].attemptWallMs.value, 30);
+	assert.equal(h.requests[0].requestWallMs.value, 80);
+	assert.equal(h.requests[0].status, "succeeded");
+	assert.equal(h.attempts.every(attempt => attempt.requestId === h.requests[0].requestId), true);
+});
+
+for (const aborted of [false, true]) test(`a throwing fetch retains a ${aborted ? "aborted" : "failed"} dispatched attempt`, async () => {
+	const h = hooks(), time = fixtureClock();
+	const fixture = await fixtureRuntime(() => { time.at(13); return { fetchError: aborted
+		? new DOMException("PRIVATE_FETCH_FAILURE", "AbortError") : new Error("PRIVATE_FETCH_FAILURE") }; });
+	const prepared = await prepareCodexRuntime("/unused", h.value, async () => fixture.runtime, time.clock);
+	await prepared.runtime.completeSimple(prepared.model, { messages: context.messages }, { maxRetries: 0 });
+	assert.equal(fixture.dispatches.length, 1);
+	assert.equal(h.attempts.length, 1);
+	assert.equal(h.attempts[0].attemptWallMs.value, 13);
+	assert.equal(h.attempts[0].timing.status, aborted ? "aborted" : "failed");
+	assert.equal(h.attempts[0].responseHeadersMs.value, null);
+	assert.equal(h.attempts[0].providerUsage.inputTokens, null);
+	assert.equal(JSON.stringify(h.attempts).includes("PRIVATE_FETCH_FAILURE"), false);
+});
+
+test("a pre-dispatch observation failure never invents a dispatched attempt", async () => {
+	const h = hooks();
+	h.value.onAttemptStart = () => { throw new Error("observer unavailable"); };
+	const fixture = await fixtureRuntime(() => ({ usage: measuredUsage }));
+	const prepared = await prepareCodexRuntime("/unused", h.value, async () => fixture.runtime);
+	await prepared.runtime.completeSimple(prepared.model, { messages: context.messages }, { maxRetries: 0 });
+	assert.equal(fixture.dispatches.length, 0);
+	assert.equal(h.requests[0].attempts.length, 0);
+	assert.equal(h.requests[0].status, "failed");
+});
+
+test("a rejected wire gate has a failed logical request and zero dispatched attempts", async () => {
+	const h = hooks();
+	h.value.beforeHttpAttempt = () => { throw new Error("wire gate"); };
+	const fixture = await fixtureRuntime(() => ({ usage: measuredUsage }));
+	const prepared = await prepareCodexRuntime("/unused", h.value, async () => fixture.runtime);
+	await prepared.runtime.completeSimple(prepared.model, { messages: context.messages }, { maxRetries: 0 });
+	assert.equal(fixture.dispatches.length, 0);
+	assert.equal(h.requests.length, 1);
+	assert.equal(h.requests[0].status, "failed");
+	assert.equal(h.attempts.length, 0);
+});
+
+test("native parser failure has a failed request and a canceled body without retaining error content", async () => {
+	const h = hooks();
+	const fixture = await fixtureRuntime(() => ({ response: new Response("data: PRIVATE_INVALID_JSON\n\n", {
+		headers: { "Content-Type": "text/event-stream" },
+	}) }));
+	const prepared = await prepareCodexRuntime("/unused", h.value, async () => fixture.runtime);
+	await prepared.runtime.completeSimple(prepared.model, { messages: context.messages }, { maxRetries: 0 });
+	assert.equal(h.requests[0].status, "failed");
+	assert.equal(h.attempts[0].timing.status, "canceled");
+	assert.equal(h.attempts[0].observationComplete, false);
+	assert.equal(JSON.stringify(h.attempts).includes("PRIVATE_INVALID_JSON"), false);
 });
 
 test("a stream without terminal response leaves measurement presence unknown", async () => {

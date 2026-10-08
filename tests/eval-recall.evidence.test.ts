@@ -8,21 +8,41 @@ import { scoreAnswer } from "../eval/recall/scoring.ts";
 import { decodeCodexPayload, type OriginIndex, type RequestMeta } from "../eval/recall/codex-payload.ts";
 import { analyzeProbe, matchFact, type ProbeEvidenceInput, type RecoveryResult } from "../eval/recall/evidence.ts";
 import { sanitizeArtifact } from "../eval/recall/safe-artifacts.ts";
-import { evidenceFixture } from "./fixtures/eval-recall.ts";
+import { evidenceFixture, ownerFixture } from "./fixtures/eval-recall.ts";
 
 const w = buildWorkload("evidence");
 const probe = w.probes.A[0];
 const fact = factForProbe(w, probe)!;
-const meta: RequestMeta = { requestId: "r0", promptId: probe.step.id, arm: "paging", purpose: "conversation" };
+const meta: RequestMeta = { ...ownerFixture(), requestId: "r0", promptId: probe.step.id, arm: "paging", purpose: "conversation" };
 const basePayload = { model: "gpt-6-luna", instructions: "Recall accurately.", store: false, input: [] };
 const source = w.seedSteps.find(s => s.id === fact.sourcePromptId)!;
 const origins: OriginIndex = [{ role: "user", texts: [source.text], sourcePromptId: source.id }];
 const goodScore = scoreAnswer(probe, fact.value, JSON.stringify({ answer: fact.value }));
 function input(overrides: Partial<ProbeEvidenceInput> = {}): ProbeEvidenceInput {
-	return { probe, fact, initial: evidenceFixture(), followUps: [], recoveryResults: [], score: goodScore, finalAnswerEventIndex: 3, ...overrides };
+	return { probe, fact, initial: evidenceFixture(), followUps: [evidenceFixture({ requestId: "r1", blocks: [{ role: "assistant", kind: "tool-call", toolCallId: "call", text: "search_history" }] })],
+		observedCalls: [{ ...meta, toolCallId: "call", toolName: "search_history", eventIndex: 1 }], recoveryResults: [], score: goodScore, finalAnswerEventIndex: 3, ...overrides };
 }
+
+test("recovery requires the actual observed call, originating request, full owner, and tool name", () => {
+	const good = input({ recoveryResults: [recovery()] });
+	assert.equal(analyzeProbe(good).recoverySuccess, true);
+	for (const observedCalls of [[], [{ ...good.observedCalls![0], requestId: "other" }],
+		[{ ...good.observedCalls![0], sessionId: "foreign" }], [{ ...good.observedCalls![0], toolName: "read_history" }]]) {
+		assert.equal(analyzeProbe({ ...good, observedCalls }).recoverySuccess, false);
+	}
+});
+test("native compound tool identity joins only the exact wire call and item IDs", () => {
+	const nativeId = "call|fc_recovery";
+	const followUp = decodeCodexPayload({ ...basePayload, input: [{ type: "function_call", id: "fc_recovery", call_id: "call", name: "search_history", arguments: "{}" }] }, { ...meta, requestId: "r1" }, []);
+	const good = input({ followUps: [followUp], recoveryResults: [recovery({ toolCallId: nativeId })], observedCalls: [{ ...meta, toolCallId: nativeId, toolName: "search_history", eventIndex: 1 }] });
+	assert.equal(analyzeProbe(good).recoverySuccess, true);
+	for (const id of ["call|fc_foreign", "other|fc_recovery", "call|fc_recovery|extra"]) {
+		assert.equal(analyzeProbe({ ...good, recoveryResults: [recovery({ toolCallId: id })], observedCalls: [{ ...good.observedCalls![0], toolCallId: id }] }).recoverySuccess, false);
+	}
+});
+
 function recovery(overrides: Partial<RecoveryResult> = {}): RecoveryResult {
-	return { promptId: meta.promptId, requestId: "r0", toolCallId: "call", toolName: "search_history", text: `Search reference: ${fact.value}`, isError: false, eventIndex: 2, ...overrides };
+	return { ...ownerFixture(), promptId: meta.promptId, requestId: "r0", toolCallId: "call", toolName: "search_history", text: `Search reference: ${fact.value}`, isError: false, eventIndex: 2, ...overrides };
 }
 
 test("attributes a retained source by exact canonical role and text", () => {
@@ -139,7 +159,9 @@ test("unique literal matching rejects longer identifiers and path suffixes", () 
 
 test("only observed successful timely paging results with correct answers establish recovery", () => {
 	for (const toolName of PAGING_TOOL_NAMES) {
-		const result = analyzeProbe(input({ recoveryResults: [recovery({ toolName })] }));
+		const result = analyzeProbe(input({ recoveryResults: [recovery({ toolName })],
+			observedCalls: [{ ...meta, toolCallId: "call", toolName, eventIndex: 1 }],
+			followUps: [evidenceFixture({ requestId: "r1", blocks: [{ role: "assistant", kind: "tool-call", toolCallId: "call", text: toolName }] })] }));
 		assert.equal(result.visibility, "plaintext-absent");
 		assert.equal(result.recoverySuccess, true, toolName);
 	}
@@ -151,6 +173,17 @@ test("only observed successful timely paging results with correct answers establ
 	assert.equal(analyzeProbe(input({ recoveryResults: [] })).recoverySuccess, false);
 	assert.equal(analyzeProbe(input({ recoveryResults: [recovery()], score: scoreAnswer(probe, fact.value, '{"answer":"wrong"}') })).recoverySuccess, false);
 	assert.equal(analyzeProbe(input({ recoveryResults: [recovery()], followUps: [evidenceFixture({ requestId: "r1", complete: false })] })).qualified, false);
+});
+
+test("another fork cannot satisfy a recovery join", () => {
+	const own = ownerFixture("paging", { runId: "run", seed: "seed", sessionId: "fork-one", checkpointId: "checkpoint", forkId: "one" });
+	const initial = evidenceFixture(own);
+	const followUps = [evidenceFixture({ ...own, requestId: "r1", blocks: [{ role: "assistant", kind: "tool-call", toolCallId: "call", text: "search_history" }] })];
+	const good = recovery(own);
+	const observedCalls = [{ ...meta, ...own, toolCallId: "call", toolName: "search_history", eventIndex: 1 }];
+	assert.equal(analyzeProbe(input({ initial, followUps, observedCalls, recoveryResults: [good] })).recoverySuccess, true);
+	const other = recovery({ ...own, sessionId: "fork-two", forkId: "two" });
+	assert.equal(analyzeProbe(input({ initial, followUps, observedCalls, recoveryResults: [other] })).recoverySuccess, false);
 });
 
 test("qualification requires excluded source records and one arm's complete trace", () => {

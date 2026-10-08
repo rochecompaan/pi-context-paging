@@ -1,10 +1,9 @@
 import { createHash } from "node:crypto";
-import type { Arm } from "./workload.ts";
+import type { SessionOwner } from "./metrics.ts";
 
-export type RequestMeta = {
+export type RequestMeta = SessionOwner & {
 	requestId: string;
 	promptId: string;
-	arm: Arm;
 	purpose: "conversation" | "compaction";
 };
 export type OriginIndex = readonly {
@@ -20,6 +19,7 @@ export type ReadableBlock = {
 	sourcePromptId?: string;
 	compactionEntryId?: string;
 	toolCallId?: string;
+	toolItemId?: string;
 };
 export type RequestEvidence = RequestMeta & {
 	complete: boolean;
@@ -40,7 +40,7 @@ export function decodeCodexPayload(payload: unknown, meta: RequestMeta, origins:
 	const hashes: string[] = [];
 	const errors = new Set<string>();
 	const fail = (code: string) => { errors.add(code); };
-	const add = (role: string, texts: string[], kind: ReadableBlock["kind"] = "message", toolCallId?: string) => {
+	const add = (role: string, texts: string[], kind: ReadableBlock["kind"] = "message", toolCallId?: string, toolItemId?: string) => {
 		const matches = kind === "message" && role === "user" ? origins.filter(origin => origin.role === role
 			&& origin.texts.length === texts.length && origin.texts.every((text, i) => text === texts[i])) : [];
 		if (matches.length > 1) fail("ambiguous-origin");
@@ -49,6 +49,7 @@ export function decodeCodexPayload(payload: unknown, meta: RequestMeta, origins:
 			...(origin?.sourcePromptId ? { sourcePromptId: origin.sourcePromptId } : {}),
 			...(origin?.compactionEntryId ? { compactionEntryId: origin.compactionEntryId } : {}),
 			...(toolCallId ? { toolCallId } : {}),
+			...(toolItemId ? { toolItemId } : {}),
 		});
 	};
 	const contentTexts = (content: unknown, types: readonly string[]): string[] => {
@@ -87,7 +88,8 @@ export function decodeCodexPayload(payload: unknown, meta: RequestMeta, origins:
 		} else if (value.type === "function_call" || value.type === "custom_tool_call") {
 			const argumentsText = value.type === "function_call" ? value.arguments : value.input;
 			if (typeof value.call_id !== "string" || typeof value.name !== "string" || typeof argumentsText !== "string") fail("invalid-tool-call");
-			else add("assistant", [value.name, argumentsText], "tool-call", value.call_id);
+			else if (value.id !== undefined && (typeof value.id !== "string" || !value.id || value.id.includes("|"))) fail("invalid-tool-item-id");
+			else add("assistant", [value.name, argumentsText], "tool-call", value.call_id, value.id as string | undefined);
 		} else if (value.type === "function_call_output" || value.type === "custom_tool_call_output") {
 			if (typeof value.call_id !== "string") fail("invalid-tool-output");
 			else add("toolResult", contentTexts(value.output, ["input_text"]), "tool-result", value.call_id);

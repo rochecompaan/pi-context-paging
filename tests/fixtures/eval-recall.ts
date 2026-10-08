@@ -2,40 +2,48 @@ import type { Arm, PromptStep, Workload } from "../../eval/recall/workload.ts";
 import { factForProbe } from "../../eval/recall/workload.ts";
 import type { ReadableBlock, RequestEvidence, RequestMeta } from "../../eval/recall/codex-payload.ts";
 import type { ArmSnapshot, EvalArm } from "../../eval/recall/pi-arm.ts";
+import type { SessionOwner } from "../../eval/recall/metrics.ts";
+
+export function ownerFixture(arm: Arm = "paging", overrides: Partial<SessionOwner> = {}): SessionOwner {
+	return { runId: "fixture-run", stage: "A", seed: "fixture-seed", arm, sessionId: `fixture-${arm}`,
+		checkpointId: null, forkId: null, ...overrides };
+}
 
 export function evidenceFixture(overrides: Partial<RequestEvidence> = {}): RequestEvidence {
-	return { requestId: "r0", promptId: "probe-A-id", arm: "paging", purpose: "conversation",
+	return { ...ownerFixture(overrides.arm), requestId: "r0", promptId: "probe-A-id", purpose: "conversation",
 		complete: true, blocks: [], opaque: { count: 0, hashes: [] }, ...overrides };
 }
 
 export type ArmScript = (step: PromptStep, snapshot: ArmSnapshot) => Partial<ArmSnapshot>;
 export function makeScriptedArm(options: {
-	arm: Arm; workload: Workload; beforeAttempt: (meta: RequestMeta) => void | Promise<void>; order: string[]; script?: ArmScript;
+	arm: Arm; owner?: SessionOwner; workload: Workload; beforeAttempt: (meta: RequestMeta) => void | Promise<void>; order: string[]; script?: ArmScript;
 	attempts?: (step: PromptStep) => number; onPrompt?: (step: PromptStep) => Promise<void>; onAbort?: () => void;
 }) {
 	const { arm, workload } = options;
+	const owner = options.owner ?? ownerFixture(arm);
 	const received: PromptStep[] = [];
 	let disposed = false, aborted = 0;
-	let state: ArmSnapshot = { arm, finalAnswerText: "", finalAnswerEventIndex: -1, entries: [], origins: [],
-		requests: [], usageLedger: [], recoveryResults: [], compactions: [], promptCount: 0, latencyMs: 0, errors: [],
+	let state: ArmSnapshot = { arm, owner, finalAnswerText: "", finalAnswerEventIndex: -1, entries: [], origins: [],
+		requests: [], requestRecords: [], taskRecords: [], usageLedger: [], executionUsage: [], recoveryResults: [], toolCalls: [], compactions: [], promptCount: 0, latencyMs: 0, errors: [],
 		statsCrossCheck: { tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 },
 		modelMetadata: { provider: "openai-codex", id: "gpt-6-luna", api: "openai-codex-responses", contextWindow: 272000,
 			maxTokens: 16384, reasoning: true, cost: { input: 1, output: 1, cacheRead: 1, cacheWrite: 0 } },
 		metadataFingerprint: "fixture-model" };
 	const instance: EvalArm = {
+		async captureCheckpoint() { throw new Error("Legacy scripted arm has no native checkpoint"); },
 		async runPrompt(step) {
 			received.push(step);
 			options.order.push(`${arm}:${step.id}`);
 			state = { ...state, promptCount: received.length };
 			for (let index = 0; index < (options.attempts?.(step) ?? 1); index++) {
-				await options.beforeAttempt({ arm, promptId: step.id, requestId: `${arm}-${step.id}-${index}`,
+				await options.beforeAttempt({ ...owner, promptId: step.id, requestId: `${arm}-${step.id}-${index}`,
 					purpose: index ? "compaction" : "conversation" });
 			}
 			const compacted = state.compactions.some(event => event.success);
 			const originals = arm === "baseline" && !compacted;
 			const blocks: ReadableBlock[] = originals ? workload.facts.map(fact => ({ role: "user", kind: "message",
 				text: `${fact.subject}: ${fact.field} = ${fact.value}`, sourcePromptId: fact.sourcePromptId })) : [];
-			const request = evidenceFixture({ arm, promptId: step.id, requestId: `${arm}-${step.id}`, blocks });
+			const request = evidenceFixture({ ...owner, promptId: step.id, requestId: `${arm}-${step.id}`, blocks });
 			let finalAnswerText = "Noted.";
 			if (step.kind === "probe") {
 				const probe = [...workload.probes.A, ...workload.probes.B].find(probe => probe.id === step.probeId)!;

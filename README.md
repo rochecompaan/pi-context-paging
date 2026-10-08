@@ -210,6 +210,14 @@ Load and read preserve exact public text, tool-call data, and ordinary tool resu
 The tools never summarize.
 When paging is disabled, the tools refuse to run.
 
+Search indexes actual public text, including words after newlines.
+It ignores punctuation around identifiers but preserves separators inside identifiers and paths.
+
+With `load: true`, `search_history` returns all requested `references` and loads at most three `items`.
+The `unloadedHistoryIds` array lists the other matches in search order.
+Use `load_history` to load those IDs, at most three per call.
+The compact references retain their 8,000-character limit, even when search also loads items.
+
 ### Private assistant content
 
 Recovery tools exclude assistant thinking blocks, redacted thinking payloads, and provider signatures.

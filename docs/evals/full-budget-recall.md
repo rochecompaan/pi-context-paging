@@ -1,79 +1,144 @@
-# Full-budget recall evaluation
+# Full-budget isolated recall evaluation
 
-This development harness compares fresh baseline and paging sessions with identical prompts in each matched pair.
-Stages A and B use separate pairs and do not share conversation history.
-The baseline uses native compaction. The paging session uses the real extension and its four history tools.
-Production paging code does not change.
+This development harness compares baseline recall with paging recovery through separate questions.
+A checkpoint is the prepared conversation before any recall question.
+A fork is an independent session restored from that checkpoint.
+Stages A and B use separate preparation histories and deterministic seeds.
+Production paging code and dependency pins do not change.
 
 ## Fixed configuration
 
 The harness uses `openai-codex/gpt-6-luna`, `xhigh` thinking, and the repository-pinned Pi SDK 0.87.1.
-Both sessions use the same native model metadata and compaction configuration.
-The paging budget is 128,000 tokens. The trim target is 80,000 tokens.
-The harness never replaces an unavailable model or lowers either budget.
+Both arms use identical native model metadata and compaction defaults.
+The paging budget is 128,000 tokens, with an 80,000-token trim target.
+The harness never substitutes a model or lowers these budgets.
 
-Server-Sent Events (SSE) is the required transport for each model request.
-The harness observes the native Codex adapter. It does not construct a replacement request or use WebSocket transport.
-Sessions have no file or shell tools, unrelated extensions, skills, or context files.
-Only the paging session receives recovery tools.
+Server-Sent Events (SSE) carries every model request.
+The harness observes the native Codex adapter without replacing its request construction.
+Sessions contain no file tools, shell tools, unrelated extensions, skills, or context files.
+Only paging sessions receive the four unchanged history tools.
+Tools cannot access checkpoints, sibling sessions, scoring keys, or host artifacts.
 
-## Preparation
+## Offline preparation and source integrity
 
-Use Node.js 22.19 or later and install the repository dependencies:
+Use Node.js 22.19 or later.
+From the source checkout, install dependencies and run the offline commands:
 
 ```sh
 npm ci --ignore-scripts
 npm run check
 npm run eval:recall -- --dry-run
+npm run eval:recall
 ```
 
-The default invocation is also a dry run. Neither command reads credentials, creates model sessions, or sends model requests.
-Authenticate through Pi with your existing Codex account before a live run.
-The harness uses Pi's model runtime and the active agent directory. It does not copy credentials into artifacts.
-An unavailable model, missing credentials, or unsupported thinking level stops the run without a substitute.
+Both eval commands report a dry run.
+Neither reads credentials, creates source sessions or forks, or sends provider requests.
+Runtime restoration tests use local provider fixtures at the full budgets.
+Read [the offline findings](isolated-recall-restoration.md) before requesting a live run.
+A dry run alone does not establish restoration fidelity, which means equivalent history, paging state, and outgoing model input.
 
-Commit all harness changes before a live run.
-The entry-point checkout must contain tracked live sources and have no staged edits, unstaged edits, or non-ignored untracked files.
+Do not run a live pilot or batch without separate user authorization for that run.
+First obtain implementation approval and commit all harness changes.
+Then authenticate through Pi with the existing Codex account.
+The harness uses Pi's model runtime and active agent directory without copying credentials into artifacts.
+Missing credentials, unavailable models, or unsupported thinking levels stop the run without a substitute.
+
+The entry-point checkout must contain tracked live sources.
+It must contain no staged edits, unstaged edits, or non-ignored untracked files.
 The manifest records the full Git revision and the `clean-checkout-v1` source policy.
-The harness makes sure that the checkout still matches before live imports, every HTTP attempt, and finalization.
-Retries receive the same source check. Keep source files unchanged throughout the run.
+The harness enforces this policy before live imports, every HTTP attempt, and finalization.
+Retries receive the same source check.
+Keep source files unchanged throughout the run.
 
-The default output directory is `.pi/evals/full-budget-recall`, which Git ignores.
-A custom output directory must be outside the source checkout or in an ignored path.
-A source change stops further requests and removes verified source-policy evidence from writable artifacts.
-After a harness fix, rerun automated verification, commit the fix, and run a new pilot.
+Git ignores the default output directory, `.pi/evals/full-budget-recall`.
+A custom output directory must be outside the checkout or inside an ignored path.
+Source drift stops further requests and removes verified source-policy evidence from writable artifacts.
+After a fix, rerun offline verification and commit the changed harness.
+A replacement pilot requires fresh user authorization.
 
-## Pilot and batch
+## Sources, checkpoints, and isolated questions
 
-A matched pair contains one baseline session and one paging session.
-Start with one pilot containing one fresh pair per stage, or four sessions:
+An arm contains one baseline or paging source and six probe forks.
+A probe is one recall question, with its own answer and evidence.
+A stage group contains both arms, with two sources and twelve forks.
+Each arm receives five known questions and one unknown control.
+Both arms receive identical preparation prompts and probe texts.
+
+Each source must complete at least 23 successive preparation prompts before capture.
+Each fork then receives exactly one probe prompt, so its lineage contains at least 24 user prompts.
+Sibling probes do not contribute to that minimum.
+Preparation contains no recall probes or history-tool execution.
+The source must settle without pending requests, queued messages, failed tools, or active compaction.
+
+Checkpoints remain private host objects, not sanitized transcript exports.
+They retain native entries, parent links, source provenance, summaries, configuration, and provider continuation fields.
+Paging restoration uses `host-lifecycle-replay-v1` to replay observed lifecycle inputs through a fresh extension instance.
+Baseline restoration copies native history and keeps native compaction defaults without paging tools.
+Restoration makes zero provider requests.
+
+Each fork has separate mutable history, paging state, request counters, journal, and tool-call joins.
+Reports contain checkpoint IDs, source leaves, configuration fingerprints, and restoration outcomes, not private checkpoints or replay tapes.
+A lookup can return all five target facts inside one fork.
+The harness does not narrow tool arguments or filter returned facts.
+That result cannot enter another fork or alter its checkpoint.
+
+## Stage boundaries and qualification
+
+Stage A freezes its sources after paging excludes all five target sources and latest exact answers from readable selected input.
+The baseline must retain zero successful native compactions before capture and through each A probe response.
+If the minimum lineage prevents this boundary, A is inconclusive.
+The controller does not lower budgets to force a result.
+
+Stage B starts with new sources and a different seed.
+The baseline must complete native compaction and exclude all five target sources before capture.
+Paging must also exclude all five target sources and latest answers.
+No A question, answer, recovery result, summary, or index enters B.
+A baseline answer from its retained summary receives normal scoring credit.
+
+The initial outgoing payload supplies final qualification, not the candidate checkpoint alone.
+Before HTTP dispatch, each known paging probe must have a complete trace with the correct fork and prompt ownership.
+Its original source and latest exact answer must be absent from every readable part of that payload.
+Quantity evidence retains subject, field, and unit boundaries.
+The gate also rejects sibling questions, answers, recovery results, and summaries.
+A rejected payload is not dispatched, and the controller stops that probe group.
+
+Each stage requires five-of-five qualified known paging probes.
+The unknown control uses its own fork and never contributes to that denominator.
+Exact-value and stale-decision scoring remain unchanged.
+Wrong answers remain scored observations, not infrastructure failures.
+Successful recovery requires a matched same-fork history-tool result before a correct final answer.
+
+Encrypted reasoning is opaque: the host cannot read it.
+The checkpoint preserves required opaque fields, while reports expose only their presence and safe digests.
+A plaintext-absent answer does not prove that the provider forgot the fact.
+Synthetic offline reasoning fixtures establish preservation, not real provider reasoning continuity.
+
+## Authorized pilot and later batch
+
+A complete pilot contains one A group and one B group.
+It uses four sources and twenty-four forks.
+Only after offline verification, implementation approval, a clean commit, and explicit pilot authorization, run:
 
 ```sh
-npm run eval:recall -- --pilot --seed pilot-independent-v2
+npm run eval:recall -- --pilot --seed pilot-isolated-v3
 ```
 
-The CLI prints its artifact directory. Read that directory's `report.md`, `manifest.json`, and `results.json` before a batch.
-The pilot must finish both independent stage pairs, each with at least 24 shared prompts and six probes.
-Both arms receive the facts and decision revisions at the start of their pair.
-Stage A requires paging source exclusion and four qualified known probes before any successful baseline compaction.
-Stage B starts fresh and requires successful native baseline compaction before its first probe.
-The B conversations receive no A probes, answers, recovery results, or summaries.
-Distinct seeds and fresh session managers keep the stages separate.
+Read the printed directory's `report.md`, `manifest.json`, `results.json`, and `completion.json` before requesting a batch.
+Pilot eligibility requires both complete stages, faithful restoration, complete ownership and host timing, successful cleanup, and complete artifact writes.
+Optional provider omissions remain explicit but do not invalidate otherwise complete recall evidence.
+Wrong answers do not prevent eligibility.
+Contamination, incomplete traces, missing stages, safety stops, source drift, and infrastructure failures prevent eligibility.
 
-A qualified probe has an exact answer absent from the readable first request.
-The original source entries must also be outside that request.
-A summary that retains an exact answer is resident evidence, not a qualified recovery success.
-Encrypted reasoning is opaque, which means that the host cannot read it.
-Plaintext absence does not prove that the model forgot a fact.
+Schema version `3` identifies workload `incident-isolated-probes-v3` and design `stage-checkpoint-probe-forks-v1`.
+The experiment fingerprint includes these identities and restoration methods.
+Schema versions 1 and 2 remain historical observations and cannot authorize a batch.
+The source revision, Node.js version, SDK version, model metadata, transport, and configuration must match the new pilot.
+`completion.json` supplies final evidence after cleanup and artifact completion.
+A stale summary without that file cannot authorize a batch.
 
-A structurally complete pilot can qualify even when model answers are wrong.
-Contamination, incomplete traces, missing stages, safety stops, source changes, or infrastructure errors block the batch.
-The source revision, Node.js version, SDK version, model metadata, transport, and configuration must match the pilot.
-`completion.json` records successful finalization after session cleanup and artifact writes.
-Without this file, stale complete summaries cannot authorize a batch after a write failure.
-Schema version 2 identifies the independent-stage experiment. Old shared-conversation pilots cannot authorize this batch.
-
-Use the eligible pilot manifest to run three new pairs per stage, or twelve sessions:
+A batch requires its own user authorization after pilot review.
+The default batch contains three new groups per stage, twelve sources, and seventy-two forks.
+Only after that separate authorization, run:
 
 ```sh
 npm run eval:recall -- --batch --pilot-manifest .pi/evals/full-budget-recall/<pilot-run-id>/manifest.json
@@ -81,17 +146,19 @@ npm run eval:recall -- --batch --pilot-manifest .pi/evals/full-budget-recall/<pi
 
 Batch seed roots default to `batch-v1-1`, `batch-v1-2`, and `batch-v1-3`.
 Each root produces distinct `-stage-A` and `-stage-B` seeds.
-The first arm for A alternates baseline, paging, baseline. The first arm for B alternates paging, baseline, paging.
-`--pairs` sets the number of repetitions per stage, not the combined pair count.
-The pilot never contributes to the batch aggregate.
-For later repetitions, use `--seed` and `--pairs` without changing the fixed model or budgets.
-Invalid or incomplete pairs remain in the report. The harness does not silently replace them.
+The first A arm alternates baseline, paging, baseline.
+The first B arm alternates paging, baseline, paging.
+`--pairs` sets repetitions per stage, not the combined group count.
+The pilot never enters the batch aggregate.
+Invalid or incomplete groups remain in the report without replacement.
 
-## Limits and exit codes
+## Shared limits and exit codes
 
-The default safety limits are 64 user prompts, 12 requests per prompt, 256 requests per session, and 120 minutes per stage pair.
-The A and B pairs have separate limits. The pilot can therefore run longer and cost more than the old single-conversation pilot.
-Request limits count actual HTTP attempts, including retries, recovery follow-ups, and native compaction calls.
+Each arm shares its limits across source preparation and all six forks.
+The defaults are 64 dispatched user prompts, 12 HTTP attempts per prompt, and 256 HTTP attempts per arm.
+Each stage group has a separate 120-minute wall-time limit.
+Retries, recovery follow-ups, and native compaction calls consume the shared HTTP allowance.
+Restoration does not reset an allowance or erase a safety stop.
 These flags accept positive integers:
 
 - `--max-user-prompts`
@@ -99,41 +166,60 @@ These flags accept positive integers:
 - `--max-requests-per-arm`
 - `--max-pair-minutes`
 
-The harness aborts both sessions when a limit stops a pair.
-It retains available evidence after a provider, source, or artifact error.
+A safety stop aborts and disposes active source and fork sessions.
+The harness retains available evidence after provider, restoration, source, artifact, and cleanup failures.
 Unknown flags, conflicting modes, malformed numbers, and model or budget overrides are errors.
 
 | Exit code | Meaning |
 | --- | --- |
-| `0` | Dry run or structurally complete results, including wrong model answers |
-| `2` | Argument, authentication, provider, source, trace, or artifact error |
-| `3` | Inconclusive stages or a safety limit |
+| `0` | Dry run or structurally complete results, including wrong answers |
+| `2` | Argument, authentication, provider, restoration, source, trace, artifact, or cleanup error |
+| `3` | Inconclusive stage or safety limit |
 
-## Artifacts and interpretation
+## Private artifacts and metric interpretation
 
-Run and pair directories have mode `0700`. Artifact files have mode `0600`.
-Artifacts are private and can contain exact workload facts and model answers.
-Do not publish them without review. Keep them outside the package and Git history.
+Run, stage-group, preparation, and probe directories have mode `0700`.
+Artifact files have mode `0600`.
+Artifacts can contain exact workload facts and model answers.
+Do not publish them without review.
+Keep them outside the package and Git history.
 
-Each run contains the manifest, JSON results, and Markdown report.
-Failed runs retain error codes in results or a separate failure record when writable.
-Each pair contains the shared prompts and their hash, progress records, scored probes, and per-session evidence.
-Session evidence includes transcripts, safe request traces, recovery results, events, model metadata, and a usage ledger.
-The usage ledger joins raw measurement presence to normalized SDK usage by persisted entry ID.
-Credentials, raw provider bodies, and encrypted signatures are not exported.
-Partial artifacts remain useful even when no completion record exists.
+Each run contains `manifest.json`, `results.json`, `report.md`, and final `run-timing.json`.
+Only a successfully finalized run contains `completion.json`.
+Writable failures retain error codes in results or `failure.json`.
+Each stage group contains shared prompts and their hash, progress, scored probes, preparation snapshots, and probe snapshots.
+Snapshots retain safe transcripts, request traces, events, recovery results, usage records, and phase records.
+Credentials, raw provider bodies, private checkpoints, and encrypted signatures are not exported.
 
-Reports separate stage A and stage B, known facts and unknown controls, categories, revised decisions, and qualified-probe counts.
-They retain individual pairs and paired score differences.
-An inconclusive stage does not remove the other stage's valid independent observations.
-Facts from the unused stage returned during A are diagnostic only. They do not refresh B's separate conversation.
-Recovery attribution requires a matching successful history-tool result before a correct final answer.
-The usage report counts each persisted entry once and shows compaction as a subtotal, not an extra charge.
-Missing token measurements remain unknown rather than zero.
-SDK session statistics are a separate cross-check.
+Metrics retain ownership for run, stage, seed, arm, checkpoint, fork, prompt, request, and HTTP attempt.
+A logical request can contain several HTTP attempts because of retries.
+Tokens, cache counts, catalog costs, and durations appear separately for preparation, each probe, arms, stage groups, stages, and the run.
+Arm usage counts preparation once, then only new requests from its forks.
+Inherited entries and replay create no provider usage.
+Inherited SDK session statistics remain a separate cross-check, not an additional charge.
 
-Costs are catalog estimates from SDK usage, not Codex invoices.
-Long sessions can consume substantial tokens even when the request limit is not reached.
-Latency includes the session lifecycle. The report records actual HTTP attempt counts.
-Three pairs per stage provide preliminary evidence, not a general claim that paging improves recall.
-Do not call an incomplete or contaminated pair a winner.
+Total input includes cached input, while reasoning is a subset of output.
+Neither subset is added to its total again.
+Cache fractions use aggregate cache reads divided by aggregate input, not an average of request fractions.
+Omitted fields remain `null` with reasons and measurement coverage.
+An explicit valid zero remains zero.
+Incomplete totals remain unknown and retain measured subtotals with observed and missing counts.
+
+The pinned SDK catalog supplies ordinary input, output, cache-read, and cache-write cost estimates.
+Reports retain pricing units, tiers, metadata fingerprints, charge applicability, and missing components.
+A catalog estimate is not a Codex invoice or subscription charge.
+No billing integration exists, so attributable billed cost remains unknown.
+Partial cost subtotals cannot support cost-savings claims.
+
+Response timing extends from dispatch through consumed-stream completion, failure, or abort, not merely response headers.
+The report separates headers, first model delta, first text, attempt duration, and logical request duration with retries and backoff.
+Task timing includes whole prompt or probe work, with setup, restoration, capture, scoring, artifact, tool, compaction, and cleanup phases.
+Nested provider, tool, and compaction intervals explain task time and are not added to it again.
+Run and stage-group wall times differ from per-arm active time.
+
+Reports preserve individual values, duration distributions, coverage, statuses, and paired differences as paging minus baseline.
+Incomplete operands prevent complete paired comparisons.
+Conversation and compaction timings remain separate, with compaction usage included once in scope totals.
+The report keeps A and B, seeds, known facts, unknown controls, categories, and revisions separate.
+Sibling forks share preparation and are not independent preparation samples.
+Three groups per stage provide preliminary evidence, not a general recall, cost, cache, or speed claim.

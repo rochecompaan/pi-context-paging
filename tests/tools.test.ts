@@ -147,11 +147,41 @@ test("executes searches, browsing, and exact loads from one current snapshot", a
 	assert.equal(registration.snapshotCount(), 5);
 });
 
+test("loaded searches expose every requested reference and let callers load a correction beyond the first three", async () => {
+	const items = Array.from({ length: 10 }, (_, sequence) => user(`h${sequence}`, sequence, `rollback v${sequence}`));
+	const { tools } = registered(items);
+	const search = tool(tools, "search_history");
+	const result = await execute(search, { query: "rollback", limit: 10, load: true });
+	const payload = details(result);
+
+	assert.deepEqual(detailReferences(payload).map((reference) => reference.historyId),
+		["h0", "h1", "h2", "h3", "h4", "h5", "h6", "h7", "h8", "h9"]);
+	assert.deepEqual(detailItems(payload).map((item) => item.id), ["h0", "h1", "h2"]);
+	assert.deepEqual(payload.unloadedHistoryIds, ["h3", "h4", "h5", "h6", "h7", "h8", "h9"]);
+	const block = result.content[0];
+	assert.ok(block.type === "text");
+	assert.deepEqual(JSON.parse(block.text), payload);
+
+	const correction = detailItems(details(await execute(tool(tools, "load_history"), { historyIds: ["h4"] })));
+	assert.deepEqual(correction, [items[4]]);
+});
+
+test("loaded searches explicitly report no unloaded results when every match fits", async () => {
+	const { tools } = registered([user("u1", 0, "alpha"), user("u2", 1, "alpha")]);
+	const payload = details(await execute(tool(tools, "search_history"), { query: "alpha", load: true }));
+
+	assert.deepEqual(detailReferences(payload).map((reference) => reference.historyId), ["u1", "u2"]);
+	assert.deepEqual(detailItems(payload).map((item) => item.id), ["u1", "u2"]);
+	assert.deepEqual(payload.unloadedHistoryIds, []);
+});
+
 test("returns no items when loading a search with no matches", async () => {
 	const { tools } = registered([user("u1", 0, "alpha")]);
 	const search = tool(tools, "search_history");
 
-	assert.deepEqual(detailItems(details(await execute(search, { query: "missing", load: true }))), []);
+	assert.deepEqual(details(await execute(search, { query: "missing", load: true })), {
+		references: [], items: [], unloadedHistoryIds: [],
+	});
 });
 
 test("limits compact replies but not exact loads", async () => {
@@ -165,6 +195,7 @@ test("limits compact replies but not exact loads", async () => {
 	const load = tool(tools, "load_history");
 
 	await assert.rejects(() => execute(search, { query: "needle" }), /8,000/);
+	await assert.rejects(() => execute(search, { query: "needle", load: true }), /8,000/);
 	await assert.rejects(() => execute(browse, { direction: "forward" }), /8,000/);
 	const exact = await execute(load, { historyIds: ["large"] });
 	assert.equal(JSON.stringify(details(exact)).length > 8_000, true);

@@ -102,6 +102,53 @@ test("search handles Unicode terms and never treats tokenless input as a match-a
 	}
 });
 
+for (const source of ["user", "assistant", "toolResult"] as const) {
+	test(`search indexes actual ${source} text across line boundaries without changing recovery content`, () => {
+		const text = "Decision:\nINC-PAGER-047 rollback v3\tRELEASE-003 approved";
+		const item = source === "user"
+			? userItem("decision", 0, text)
+			: turnItem("decision", 0, text, [], [], false);
+		if (item.kind === "user") {
+			item.userMessage.content = [{ type: "text", text }];
+		} else if (source === "toolResult") {
+			item.assistantMessage.content = [{ type: "text", text: "Read the decision" }];
+			item.toolResults = [{
+				role: "toolResult",
+				toolCallId: "read-decision",
+				toolName: "read",
+				content: [{ type: "text", text }],
+				isError: false,
+				timestamp: 0,
+			}];
+		}
+		const navigator = new HistoryNavigator([item]);
+
+		for (const query of ["INC-PAGER-047", "RELEASE-003"]) {
+			assert.deepEqual(ids(navigator.search({ query })), ["decision"], query);
+		}
+		assert.deepEqual(navigator.load(["decision"]), [item]);
+		if (source === "user") {
+			assert.equal(navigator.search({ query: "INC-PAGER-047" })[0].preview,
+				"Decision: INC-PAGER-047 rollback v3 RELEASE-003 approved");
+		}
+	});
+}
+
+for (const identifier of ["INC-PAGER-047:", "INC-PAGER-047.", "/INC-PAGER-047/", "-INC-PAGER-047-"]) {
+	test(`search normalizes surrounding punctuation in ${identifier} without merging distinct identifiers`, () => {
+		const item = userItem("decision", 0, `Rollback ${identifier} v3`);
+		const navigator = new HistoryNavigator([
+			item,
+			userItem("other-number", 1, "Rollback INC-PAGER-074 v1"),
+			userItem("other-separator", 2, "Rollback INC/PAGER/047 v1"),
+		]);
+
+		assert.deepEqual(ids(navigator.search({ query: "INC-PAGER-047" })), ["decision"]);
+		assert.deepEqual(ids(navigator.search({ query: identifier })), ["decision"]);
+		assert.deepEqual(navigator.load(["decision"]), [item]);
+	});
+}
+
 test("browse follows the anchored, unanchored, stride, and boundary matrix", () => {
 	const navigator = new HistoryNavigator(Array.from({ length: 5 }, (_, sequence) => userItem(`h${sequence}`, sequence, `item ${sequence}`)));
 

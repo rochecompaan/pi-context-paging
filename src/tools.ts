@@ -85,15 +85,19 @@ export function registerContextPagingTools(
 	pi.registerTool({
 		name: "search_history",
 		label: "Search History",
-		description: "search_history finds compact public recovery references in paged session history. Use load_history for public items or read_context_output for repeated output pages.",
+		description: "search_history finds compact public recovery references in paged session history. With load:true, it also loads up to three items and lists unloadedHistoryIds without dropping references. Use load_history for public items or read_context_output for repeated output pages.",
 		parameters: searchHistoryParameters,
 		async execute(_toolCallId, params: SearchHistoryInput, _signal, _onUpdate, ctx) {
 			const current = snapshot(dependencies, ctx);
 			const references = current.navigator.search(params);
+			const compact = compactResponse({ references });
+			if (!params.load) return compact;
 			const historyIds = references.slice(0, 3).map((reference) => reference.historyId);
-			return params.load
-				? response({ items: historyIds.length === 0 ? [] : current.navigator.load(historyIds) })
-				: compactResponse({ references });
+			return response({
+				references,
+				items: historyIds.length === 0 ? [] : current.navigator.load(historyIds),
+				unloadedHistoryIds: references.slice(historyIds.length).map((reference) => reference.historyId),
+			});
 		},
 	});
 
