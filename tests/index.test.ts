@@ -944,6 +944,18 @@ function projectedInvalidation(harness: ReturnType<typeof createHarness>, type: 
 	return { entry: fixture.entries.at(-1)!, entries: fixture.entries, messages: [...fixture.input.messages] };
 }
 
+// Pi's retry path saves the response, then omits it with a null context edit.
+function omittedAttempt(harness: ReturnType<typeof createHarness>, stopReason: string) {
+	const usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: stopReason === "stop" ? 50 : 0 };
+	const attempt = entry(`attempt-${stopReason}`, assistant(`ATTEMPT_${stopReason}`, usage, stopReason));
+	const omission = {
+		type: "context_edit", id: `omit-${stopReason}`, timestamp: "2026-09-21T00:00:00.000Z",
+		targetId: attempt.id, replacement: null,
+	};
+	const fixture = fixtureFromEntries([...harness.branch(), attempt, omission]);
+	return { attempt, entries: fixture.entries, messages: [...fixture.input.messages] };
+}
+
 for (const kind of ["active", "custom-active"] as const) {
 	test(`${kind} commits its partial cut across clones and turn completion`, async (t) => {
 		const commits = t.mock.method(ContextCutState.prototype, "commit");
@@ -1092,6 +1104,39 @@ for (const type of ["context_edit", "compaction"] as const) {
 		const second = await emit(harness, "context", { messages: structuredClone(projected) }) as any;
 		assert.equal(resets.mock.calls.length, resetCount + 1);
 		assert.deepEqual(second.messages, first.messages);
+		assert.equal(harness.abortCalls(), 0);
+	});
+}
+
+for (const [stopReason, resetsCut] of [["error", false], ["aborted", false], ["stop", true]] as const) {
+	test(`an omitted ${stopReason} response ${resetsCut ? "resets" : "keeps"} the frontier`, async (t) => {
+		const resets = t.mock.method(ContextCutState.prototype, "reset");
+		const prepares = t.mock.method(ContextUsageTracker.prototype, "prepare");
+		const { harness, messages } = resetFixture();
+		await emit(harness, "context", { messages });
+		const response = assistant("RESET_MEASURED_RESPONSE", { totalTokens: 50 });
+		const next = user("RESET_NEXT");
+		harness.setBranch([...harness.branch(), entry("reset-response", response), entry("reset-next", next)]);
+		await emit(harness, "turn_end", { message: response });
+		harness.setContextUsage({ tokens: statusTokens(50, [next]) });
+		const anchored = await emit(harness, "context", { messages: [...messages, response, next] }) as any;
+		assert.equal(typeof prepares.mock.calls.at(-1)?.result, "number");
+		assert.equal(hasMarker(anchored.messages, "RESET_A request"), false);
+		const resetCount = resets.mock.calls.length;
+		const omission = omittedAttempt(harness, stopReason);
+		harness.setBranch(omission.entries.slice(0, -1));
+		await emit(harness, "turn_end", { message: omission.attempt.message });
+		harness.setBranch(omission.entries);
+		harness.setProjectedMessages(omission.messages);
+		// After any edit, Pi's status estimates the whole projection until the next measured response.
+		harness.setContextUsage({ tokens: 1_000_000 });
+		// This retry would restore RESET_A if the omission reset the cut.
+		harness.ctx.getSystemPrompt = () => "system";
+		const retry = await emit(harness, "context", { messages: omission.messages }) as any;
+		assert.equal(prepares.mock.calls.at(-1)?.result, undefined);
+		assert.equal(resets.mock.calls.length, resetCount + (resetsCut ? 1 : 0));
+		assert.equal(hasMarker(retry.messages, "RESET_A request"), resetsCut);
+		if (!resetsCut) assert.deepEqual(retry.messages, anchored.messages);
 		assert.equal(harness.abortCalls(), 0);
 	});
 }

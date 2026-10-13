@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, SessionEntry } from "@earendil-works/pi-coding-agent";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import {
 	residentTokenEstimate,
@@ -9,7 +9,7 @@ import {
 } from "./context-policy.ts";
 import { ContextUsageTracker } from "./context-usage.ts";
 import { ContextCutState } from "./context-cut.ts";
-import { isPagingToolTurn, projectActiveBranch, type HistoryItem } from "./history.ts";
+import { isInterruptedAssistantMessage, isPagingToolTurn, projectActiveBranch, type HistoryItem } from "./history.ts";
 import { HistoryNavigator } from "./navigator.ts";
 import { registerContextPagingTools, type HistorySnapshot } from "./tools.ts";
 import { contextPagingStats, reportedInputTokens, type InputTokenCount } from "./stats.ts";
@@ -64,6 +64,24 @@ function persistentSessionMessages(ctx: ExtensionContext): AgentMessage[] {
 	return ctx.sessionManager.buildSessionProjection().messages;
 }
 
+type BranchEdits = { invalidating: string[]; omittedFailures: string[] };
+
+/** Separates history-changing edits from Pi retry edits that omit failed responses no request sent. */
+function branchEdits(branch: readonly SessionEntry[]): BranchEdits {
+	const failedResponseIds = new Set(branch
+		.filter((entry) => entry.type === "message" && entry.message.role === "assistant"
+			&& isInterruptedAssistantMessage(entry.message))
+		.map((entry) => entry.id));
+	const edits: BranchEdits = { invalidating: [], omittedFailures: [] };
+	for (const entry of branch) {
+		if (entry.type === "compaction") edits.invalidating.push(entry.id);
+		else if (entry.type !== "context_edit") continue;
+		else if (entry.replacement === null && failedResponseIds.has(entry.targetId)) edits.omittedFailures.push(entry.id);
+		else edits.invalidating.push(entry.id);
+	}
+	return edits;
+}
+
 /** Registers context paging lifecycle hooks and the four recovery tools. */
 export default function contextPagingExtension(
 	pi: ExtensionAPI,
@@ -98,15 +116,18 @@ export default function contextPagingExtension(
 	};
 	let visibleHistoryIds: string[] = [];
 	let invalidatingBranchEntries = new Set<string>();
+	let omittedFailureEntries = new Set<string>();
 	let canonicalSessionMessages: AgentMessage[] | undefined;
 	const refresh = (ctx: ExtensionContext): HistoryItem[] => {
 		const branch = ctx.sessionManager.getBranch();
-		const currentInvalidatingEntries = new Set(branch
-			.filter((entry) => entry.type === "context_edit" || entry.type === "compaction")
-			.map((entry) => entry.id));
-		if ([...currentInvalidatingEntries].some((id) => !invalidatingBranchEntries.has(id))) resetPagingState();
+		const edits = branchEdits(branch);
+		if (edits.invalidating.some((id) => !invalidatingBranchEntries.has(id))) resetPagingState();
+		// The omitted response was never sent, so the cut stands. Pi's usage status estimates
+		// the whole projection after any edit until the next measured response, so drop the anchor.
+		else if (edits.omittedFailures.some((id) => !omittedFailureEntries.has(id))) usageTracker.clear();
 		// Keep saved event IDs even before the branch view exposes their entries.
-		for (const id of currentInvalidatingEntries) invalidatingBranchEntries.add(id);
+		for (const id of edits.invalidating) invalidatingBranchEntries.add(id);
+		for (const id of edits.omittedFailures) omittedFailureEntries.add(id);
 		const projected = projectActiveBranch(branch);
 		canonicalSessionMessages = persistentSessionMessages(ctx);
 		allItems = projected;
@@ -172,6 +193,7 @@ export default function contextPagingExtension(
 		sessionEnabled = undefined;
 		resetPagingState();
 		invalidatingBranchEntries = new Set();
+		omittedFailureEntries = new Set();
 		try {
 			if (!settingsSources) {
 				resolvedSettings = { ...resolvedSettings, enabled: false };
@@ -193,6 +215,7 @@ export default function contextPagingExtension(
 	pi.on("session_tree", (_event, ctx) => {
 		resetPagingState();
 		invalidatingBranchEntries = new Set();
+		omittedFailureEntries = new Set();
 		refreshSafely(ctx);
 	});
 	pi.on("model_select", () => {
