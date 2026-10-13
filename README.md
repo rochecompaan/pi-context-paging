@@ -74,13 +74,13 @@ The model decides when to search.
 From npm:
 
 ```sh
-pi install npm:@rochecompaan/pi-context-paging@0.3.7
+pi install npm:@rochecompaan/pi-context-paging@0.3.8
 ```
 
 From the GitHub release tag:
 
 ```sh
-pi install git:github.com/rochecompaan/pi-context-paging@v0.3.7
+pi install git:github.com/rochecompaan/pi-context-paging@v0.3.8
 ```
 
 After installation, restart Pi.
@@ -289,6 +289,7 @@ It does not remember that selection.
 It never removes extra history only to find a key.
 
 **Resets.** These events reset the cut point: a session change, branch navigation, a fork, compaction, a context edit, or a model switch.
+The exception is the edit Pi saves before it retries a failed request, which only removes the failed response.
 A Pi restart also loses the cut point, because the cut point lives only in memory.
 Canceled operations do not reset it.
 A fallback in token accounting does not reset it either.
@@ -303,6 +304,12 @@ Manual compaction remains available.
 A successful manual compaction resets the cut point.
 
 Read [the architecture document](docs/architecture.md) for module and lifecycle details.
+
+## Changes in 0.3.8
+
+- When a provider request fails, Pi retries it and saves an edit that removes the failed response. Paging now keeps its cut point after that edit, because the failed response was never sent.
+- After that edit, paging ignores Pi's usage status until the next successful response, because Pi then estimates the whole session instead of reporting provider usage.
+- Every other context edit and every compaction still resets the cut point.
 
 ## Changes in 0.3.7
 
@@ -454,7 +461,7 @@ pi update --extensions
 Remove the package:
 
 ```sh
-pi remove npm:@rochecompaan/pi-context-paging@0.3.7
+pi remove npm:@rochecompaan/pi-context-paging@0.3.8
 ```
 
 ## License

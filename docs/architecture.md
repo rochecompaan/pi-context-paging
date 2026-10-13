@@ -203,6 +203,8 @@ The `turn_end` event records response usage.
 Successful `session_start` events cover new sessions, resumes, and forks. Successful `session_tree` events cover branch navigation.
 These events reset cut state and accounting. Every actual `model_select` resets both, in either window-size direction.
 Successful `session_compact` events and newly projected compaction or `context_edit` entries also reset both.
+One `context_edit` is an exception: Pi's retry edit that omits a failed or aborted assistant response.
+That response was never sent, so the cut stays. The edit clears accounting only, because Pi's usage status then estimates the whole projection until the next measured response.
 The entry module deduplicates an event and its later saved-entry notification, so they cannot reset a newly established frontier twice.
 
 Missing raw frontier keys clear old cut state. Valid current provenance can establish a fresh cut without a provider abort.
