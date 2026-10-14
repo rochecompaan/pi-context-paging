@@ -32,11 +32,14 @@ export type ModelTurnHistoryItem = {
 	assistantMessage: AssistantMessage;
 	toolResults: ToolResultMessage[];
 	metadata: HistoryMetadata;
+	/** Saved incomplete exchange identified at a session/branch restore, not a live refresh. */
+	interruptedByRestore?: true;
 };
 
 export type HistoryItem = UserHistoryItem | ModelTurnHistoryItem;
 
 export type HistoryProjectionErrorCode =
+	| "DUPLICATE_TOOL_CALL"
 	| "ORPHAN_TOOL_RESULT"
 	| "DUPLICATE_TOOL_RESULT"
 	| "INCOMPLETE_TOOL_RESULTS"
@@ -97,7 +100,7 @@ function collectFiles(value: unknown, files: string[], seen: Set<string>): void 
 	}
 }
 
-function metadataFor(message: AssistantMessage, results: ToolResultMessage[]): HistoryMetadata {
+function metadataFor(message: AssistantMessage, results: ToolResultMessage[], interruptedByRestore = false): HistoryMetadata {
 	const files: string[] = [];
 	const seenFiles = new Set<string>();
 	const calls = toolCalls(message);
@@ -105,7 +108,7 @@ function metadataFor(message: AssistantMessage, results: ToolResultMessage[]): H
 	return {
 		tools: calls.map((call) => call.name),
 		files,
-		failed: isInterruptedAssistantMessage(message) || results.some((result) => result.isError),
+		failed: interruptedByRestore || isInterruptedAssistantMessage(message) || results.some((result) => result.isError),
 	};
 }
 
@@ -116,7 +119,15 @@ function relevantEntries(entries: readonly SessionEntry[]): RelevantMessageEntry
 	);
 }
 
-export function projectActiveBranch(entries: readonly SessionEntry[]): HistoryItem[] {
+export type HistoryProjectionOptions = {
+	/** Only session/branch restore may identify newly discovered incomplete exchanges. */
+	recoverIncomplete?: boolean;
+	/** Stable saved entry IDs classified during the latest restore. */
+	interruptedEntryIds?: ReadonlySet<string>;
+};
+
+/** Projects raw history without mutation; restore options retain otherwise incomplete saved exchanges. */
+export function projectActiveBranch(entries: readonly SessionEntry[], options: HistoryProjectionOptions = {}): HistoryItem[] {
 	const messages = relevantEntries(entries);
 	const items: HistoryItem[] = [];
 
@@ -139,6 +150,7 @@ export function projectActiveBranch(entries: readonly SessionEntry[]): HistoryIt
 		const assistant = entry.message as AssistantMessage;
 		const calls = toolCalls(assistant);
 		const expectedIds = new Set(calls.map((call) => call.id));
+		if (expectedIds.size !== calls.length) throw new HistoryProjectionError("DUPLICATE_TOOL_CALL");
 		const seenIds = new Set<string>();
 		const results: ToolResultMessage[] = [];
 		let resultIndex = index + 1;
@@ -155,7 +167,10 @@ export function projectActiveBranch(entries: readonly SessionEntry[]): HistoryIt
 			resultIndex++;
 		}
 
-		if (seenIds.size !== expectedIds.size && !isInterruptedAssistantMessage(assistant)) {
+		const interruptedByRestore = seenIds.size !== expectedIds.size
+			&& !isInterruptedAssistantMessage(assistant)
+			&& (options.recoverIncomplete === true || options.interruptedEntryIds?.has(entry.id) === true);
+		if (seenIds.size !== expectedIds.size && !isInterruptedAssistantMessage(assistant) && !interruptedByRestore) {
 			if (resultIndex === messages.length) break;
 			throw new HistoryProjectionError("INCOMPLETE_TOOL_RESULTS");
 		}
@@ -167,7 +182,8 @@ export function projectActiveBranch(entries: readonly SessionEntry[]): HistoryIt
 			timestamp: entry.timestamp,
 			assistantMessage: assistant,
 			toolResults: results,
-			metadata: metadataFor(assistant, results),
+			metadata: metadataFor(assistant, results, interruptedByRestore),
+			...(interruptedByRestore ? { interruptedByRestore: true as const } : {}),
 		});
 		index = resultIndex - 1;
 	}

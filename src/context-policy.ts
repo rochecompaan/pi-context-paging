@@ -164,7 +164,19 @@ function exchangeAt(
 function normalizeInterruptedExchanges(
 	messages: readonly AgentMessage[],
 	outgoingOnly: readonly boolean[],
+	rawHistoryItems: readonly HistoryItem[] | undefined,
 ): { messages: AgentMessage[]; outgoingOnly: readonly boolean[] } {
+	const restoredIds = new Set((rawHistoryItems ?? [])
+		.filter((item) => item.kind === "modelTurn" && item.interruptedByRestore)
+		.map((item) => item.id));
+	// Use unambiguous saved-entry provenance, never a tool-call ID alone.
+	const history = restoredIds.size > 0 ? new SelectionHistoryLookup(rawHistoryItems) : undefined;
+	const restoredMatches = history ? messages.map((message) => message.role === "assistant"
+		? history.cutKey(message)?.historyId : undefined) : [];
+	const restoredOccurrences = new Map<string, number>();
+	for (const id of restoredMatches) {
+		if (id !== undefined && restoredIds.has(id)) restoredOccurrences.set(id, (restoredOccurrences.get(id) ?? 0) + 1);
+	}
 	const normalized: AgentMessage[] = [];
 	const normalizedOutgoingOnly: boolean[] = [];
 	let removedInterruptedExchange = false;
@@ -179,7 +191,10 @@ function normalizeInterruptedExchanges(
 			index++;
 			continue;
 		}
-		const interrupted = isInterruptedAssistantMessage(message);
+		const historyId = restoredMatches[index];
+		// An identical live tail must not inherit the saved exchange's classification.
+		const interrupted = isInterruptedAssistantMessage(message)
+			|| historyId !== undefined && restoredOccurrences.get(historyId) === 1;
 		const { exchange, nextIndex } = exchangeAt(messages, index, interrupted);
 		if (interrupted) removedInterruptedExchange = true;
 		else {
@@ -571,7 +586,7 @@ export function selectContext(input: ContextSelectionInput): ContextSelection {
 		? input.tokenEstimates : undefined;
 	const residentTokens = tokenEstimates?.residentTokens ?? residentTokenEstimate(input);
 	const inputOutgoingOnly = input.outgoingOnly?.length === input.messages.length ? input.outgoingOnly : input.messages.map(() => false);
-	const { messages, outgoingOnly } = normalizeInterruptedExchanges(input.messages, inputOutgoingOnly);
+	const { messages, outgoingOnly } = normalizeInterruptedExchanges(input.messages, inputOutgoingOnly, input.rawHistoryItems);
 	const grouped = groupContext(messages, outgoingOnly);
 	const outgoing = new Map(messages.map((message, index) => [message, outgoingOnly[index]!]));
 	const cache: TokenCache = { messages: new Map(), units: new WeakMap() };

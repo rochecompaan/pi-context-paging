@@ -118,7 +118,9 @@ export default function contextPagingExtension(
 	let invalidatingBranchEntries = new Set<string>();
 	let omittedFailureEntries = new Set<string>();
 	let canonicalSessionMessages: AgentMessage[] | undefined;
-	const refresh = (ctx: ExtensionContext): HistoryItem[] => {
+	let restoredInterruptedEntryIds = new Set<string>();
+	const refresh = (ctx: ExtensionContext, restoring = false): HistoryItem[] => {
+		if (restoring) restoredInterruptedEntryIds = new Set();
 		const branch = ctx.sessionManager.getBranch();
 		const edits = branchEdits(branch);
 		if (edits.invalidating.some((id) => !invalidatingBranchEntries.has(id))) resetPagingState();
@@ -128,7 +130,12 @@ export default function contextPagingExtension(
 		// Keep saved event IDs even before the branch view exposes their entries.
 		for (const id of edits.invalidating) invalidatingBranchEntries.add(id);
 		for (const id of edits.omittedFailures) omittedFailureEntries.add(id);
-		const projected = projectActiveBranch(branch);
+		const projected = projectActiveBranch(branch, {
+			recoverIncomplete: restoring, interruptedEntryIds: restoredInterruptedEntryIds,
+		});
+		if (restoring) restoredInterruptedEntryIds = new Set(projected
+			.filter((item) => item.kind === "modelTurn" && item.interruptedByRestore)
+			.map((item) => item.id));
 		canonicalSessionMessages = persistentSessionMessages(ctx);
 		allItems = projected;
 		return projected;
@@ -149,9 +156,9 @@ export default function contextPagingExtension(
 		}
 		return { allItems, navigator };
 	};
-	const refreshSafely = (ctx: ExtensionContext) => {
+	const refreshSafely = (ctx: ExtensionContext, restoring = false) => {
 		try {
-			refresh(ctx);
+			refresh(ctx, restoring);
 		} catch (error) {
 			usageTracker.clear();
 			canonicalSessionMessages = undefined;
@@ -202,7 +209,7 @@ export default function contextPagingExtension(
 		} finally {
 			publishStatus(ctx);
 		}
-		refreshSafely(ctx);
+		refreshSafely(ctx, true);
 	});
 	pi.on("session_shutdown", (_event, ctx) => {
 		if (ctx.hasUI) ctx.ui.setStatus("context-paging", undefined);
@@ -216,7 +223,7 @@ export default function contextPagingExtension(
 		resetPagingState();
 		invalidatingBranchEntries = new Set();
 		omittedFailureEntries = new Set();
-		refreshSafely(ctx);
+		refreshSafely(ctx, true);
 	});
 	pi.on("model_select", () => {
 		resetPagingState();

@@ -74,13 +74,13 @@ The model decides when to search.
 From npm:
 
 ```sh
-pi install npm:@rochecompaan/pi-context-paging@0.3.8
+pi install npm:@rochecompaan/pi-context-paging@0.3.9
 ```
 
 From the GitHub release tag:
 
 ```sh
-pi install git:github.com/rochecompaan/pi-context-paging@v0.3.8
+pi install git:github.com/rochecompaan/pi-context-paging@v0.3.9
 ```
 
 After installation, restart Pi.
@@ -247,6 +247,12 @@ The system prompt and tool definitions count once.
 It does not send aborted or errored assistant exchanges to the model.
 Those exchanges and their actual results stay in the stored history and the recovery tools.
 
+When a session loads or changes branches, paging also treats saved tool calls with missing results as interrupted.
+It excludes those incomplete exchanges from model requests but keeps their recorded messages and actual results available through recovery tools.
+It does not change session files or add missing results.
+New tool calls in a live session still require results.
+Duplicate, mismatched, and orphan results still raise errors.
+
 **The cut point.** A request within the budget needs no cut and no notice.
 When a request exceeds the budget, the extension removes the oldest history until the request is at or below the target.
 The size of the paging notice counts as part of the request.
@@ -304,6 +310,13 @@ Manual compaction remains available.
 A successful manual compaction resets the cut point.
 
 Read [the architecture document](docs/architecture.md) for module and lifecycle details.
+
+## Changes in 0.3.9
+
+- Session loads and branch changes recover saved tool exchanges with missing results after a crash, even when the assistant still reports `toolUse`.
+- Paging excludes those incomplete exchanges from model requests but keeps their original messages and actual results available through recovery tools.
+- Live-session calls still require results. Duplicate, mismatched, and orphan results still raise errors.
+- Recovery does not change session files or add missing results.
 
 ## Changes in 0.3.8
 
@@ -461,7 +474,7 @@ pi update --extensions
 Remove the package:
 
 ```sh
-pi remove npm:@rochecompaan/pi-context-paging@0.3.8
+pi remove npm:@rochecompaan/pi-context-paging@0.3.9
 ```
 
 ## License
