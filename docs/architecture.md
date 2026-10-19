@@ -29,6 +29,16 @@ These slots preserve original assistant content indices.
 User content, tool arguments, and ordinary tool results remain exact.
 The filter does not recursively remove application-owned fields or text.
 
+A wrapper result's optional host-level `nestedCalls` record can identify an excluded outer exchange.
+Classification requires `complete: true`, a nonempty call list, and paging names on every record.
+Each record also needs a nonempty string ID and status `ok`, `error`, or `unfinished`.
+The shared call-ID policy excludes the outer call and result together, including in notices and emergency output handles.
+It does not inspect wrapper scripts or tool-specific `details.calls` previews.
+Mixed, missing, incomplete, empty, or malformed required records leave the wrapper readable.
+Nested metadata does not store child results or output-to-call links. Mixed wrapper output cannot be split with this record.
+Completeness covers nested tools, not arbitrary script computation or non-tool model work.
+Older hosts without this field keep their previous behavior. No dependency update is required.
+
 `navigator.ts` builds compact search records from this public view.
 Search and previews skip the omitted slots.
 Search serializes large tool output only when a query needs it.

@@ -271,6 +271,12 @@ Turns with only paging activity do not appear in recovery.
 Mixed turns retain their public assistant text and ordinary work.
 Their tool, file, and failure filters describe only the retained work, including any interrupted response.
 
+Wrappers such as `codemode` also stay out of recovery when Pi records a complete, nonempty list of exclusively paging-tool calls.
+This uses the host's `nestedCalls` record, not script text or tool-owned previews.
+Mixed wrappers and wrappers with missing, incomplete, empty, or malformed required records stay readable.
+Pi records nested tool metadata, not separate child outputs. Paging output inside mixed wrappers therefore remains readable.
+The record does not describe arbitrary script computation or non-tool model work.
+
 Loaded assistant content uses `null` for each omitted block.
 These slots preserve the original array indices.
 The page reader uses those original `contentIndex` values and rejects reads of omitted blocks.

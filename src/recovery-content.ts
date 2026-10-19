@@ -12,9 +12,24 @@ export type RecoveryModelTurnHistoryItem = Omit<ModelTurnHistoryItem, "assistant
 export type RecoveryHistoryItem = UserHistoryItem | RecoveryModelTurnHistoryItem;
 const pagingNames = new Set<string>(PAGING_TOOL_NAMES);
 
-/** Both sides identify paging activity; saved result names need not match call names. */
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** Host provenance is optional on older Pi versions; tool-owned details are not equivalent. */
+function hasOnlyNestedPagingCalls(result: ToolResultMessage): boolean {
+	const nested = "nestedCalls" in result ? result.nestedCalls : undefined;
+	if (!isRecord(nested) || nested.complete !== true || !Array.isArray(nested.calls) || nested.calls.length === 0) return false;
+	return nested.calls.every((call: unknown) => isRecord(call)
+		&& typeof call.id === "string" && call.id.length > 0
+		&& typeof call.name === "string" && pagingNames.has(call.name)
+		&& (call.status === "ok" || call.status === "error" || call.status === "unfinished"));
+}
+
+/** Both sides identify direct paging activity; complete paging-only wrappers are excluded too. */
 export function pagingToolCallIds(message: AssistantMessage, results: readonly ToolResultMessage[]): Set<string> {
-	const ids = new Set(results.filter((result) => pagingNames.has(result.toolName)).map((result) => result.toolCallId));
+	const ids = new Set(results.filter((result) => pagingNames.has(result.toolName) || hasOnlyNestedPagingCalls(result))
+		.map((result) => result.toolCallId));
 	for (const block of message.content) {
 		if (block.type === "toolCall" && pagingNames.has(block.name)) ids.add(block.id);
 	}
