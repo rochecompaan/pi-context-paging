@@ -9,7 +9,8 @@ import {
 } from "./context-policy.ts";
 import { ContextUsageTracker } from "./context-usage.ts";
 import { ContextCutState } from "./context-cut.ts";
-import { isInterruptedAssistantMessage, isPagingToolTurn, projectActiveBranch, type HistoryItem } from "./history.ts";
+import { isInterruptedAssistantMessage, projectActiveBranch, type HistoryItem } from "./history.ts";
+import { isRecoverableHistoryItem } from "./recovery-content.ts";
 import { HistoryNavigator } from "./navigator.ts";
 import { registerContextPagingTools, type HistorySnapshot } from "./tools.ts";
 import { contextPagingStats, reportedInputTokens, type InputTokenCount } from "./stats.ts";
@@ -143,7 +144,7 @@ export default function contextPagingExtension(
 	const visibleHistoryChanged = (items: readonly HistoryItem[]): boolean => {
 		let index = 0;
 		for (const item of items) {
-			if (isPagingToolTurn(item)) continue;
+			if (!isRecoverableHistoryItem(item)) continue;
 			if (item.id !== visibleHistoryIds[index++]) return true;
 		}
 		return index !== visibleHistoryIds.length;
@@ -152,7 +153,7 @@ export default function contextPagingExtension(
 		const projected = refresh(ctx);
 		if (visibleHistoryChanged(projected)) {
 			navigator.rebuild(projected);
-			visibleHistoryIds = projected.filter((item) => !isPagingToolTurn(item)).map((item) => item.id);
+			visibleHistoryIds = projected.filter(isRecoverableHistoryItem).map((item) => item.id);
 		}
 		return { allItems, navigator };
 	};

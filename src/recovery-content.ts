@@ -1,5 +1,5 @@
-import type { AssistantMessage, TextContent, ToolCall } from "@earendil-works/pi-ai";
-import type { HistoryItem, ModelTurnHistoryItem, UserHistoryItem } from "./history.ts";
+import type { AssistantMessage, TextContent, ToolCall, ToolResultMessage } from "@earendil-works/pi-ai";
+import { isPagingToolTurn, metadataFor, PAGING_TOOL_NAMES, type HistoryItem, type ModelTurnHistoryItem, type UserHistoryItem } from "./history.ts";
 
 export type PublicAssistantBlock = Pick<TextContent, "type" | "text"> | Omit<ToolCall, "thoughtSignature">;
 
@@ -10,11 +10,32 @@ export type RecoveryModelTurnHistoryItem = Omit<ModelTurnHistoryItem, "assistant
 };
 
 export type RecoveryHistoryItem = UserHistoryItem | RecoveryModelTurnHistoryItem;
+const pagingNames = new Set<string>(PAGING_TOOL_NAMES);
+
+/** Both sides identify paging activity; saved result names need not match call names. */
+export function pagingToolCallIds(message: AssistantMessage, results: readonly ToolResultMessage[]): Set<string> {
+	const ids = new Set(results.filter((result) => pagingNames.has(result.toolName)).map((result) => result.toolCallId));
+	for (const block of message.content) {
+		if (block.type === "toolCall" && pagingNames.has(block.name)) ids.add(block.id);
+	}
+	return ids;
+}
+
+function hasRecoverableTurnContent(item: ModelTurnHistoryItem, excludedIds: ReadonlySet<string>): boolean {
+	if (excludedIds.size === 0 && !isPagingToolTurn(item)) return true;
+	return item.assistantMessage.content.some((block) => block.type === "toolCall" && !excludedIds.has(block.id))
+		|| item.toolResults.some((result) => !excludedIds.has(result.toolCallId));
+}
+
+/** Paging-only turns are hidden; mixed turns retain their ordinary work. */
+export function isRecoverableHistoryItem(item: HistoryItem): boolean {
+	return item.kind === "user" || hasRecoverableTurnContent(item, pagingToolCallIds(item.assistantMessage, item.toolResults));
+}
 
 /** Allow only public assistant fields; provider signatures never become tool text. */
 export function publicAssistantBlock(block: AssistantMessage["content"][number]): PublicAssistantBlock | null {
 	if (block.type === "text") return { type: "text", text: block.text };
-	if (block.type === "toolCall") {
+	if (block.type === "toolCall" && !pagingNames.has(block.name)) {
 		const call: PublicAssistantBlock = {
 			type: "toolCall",
 			id: block.id,
@@ -28,13 +49,21 @@ export function publicAssistantBlock(block: AssistantMessage["content"][number])
 }
 
 /** Keep null slots so output-page contentIndex values still address the raw history. */
-export function recoveryHistoryItem(item: HistoryItem): RecoveryHistoryItem {
+export function recoveryHistoryItem(item: HistoryItem): RecoveryHistoryItem | undefined {
 	if (item.kind === "user") return item;
+	const excludedIds = pagingToolCallIds(item.assistantMessage, item.toolResults);
+	if (!hasRecoverableTurnContent(item, excludedIds)) return undefined;
+	const content = item.assistantMessage.content.map((block) =>
+		block.type === "toolCall" && excludedIds.has(block.id) ? null : publicAssistantBlock(block));
+	const toolResults = item.toolResults.filter((result) => !excludedIds.has(result.toolCallId));
+	const metadata = excludedIds.size === 0 ? item.metadata : metadataFor({
+		...item.assistantMessage,
+		content: content.filter((block): block is PublicAssistantBlock => block !== null),
+	}, toolResults, item.interruptedByRestore);
 	return {
 		...item,
-		assistantMessage: {
-			...item.assistantMessage,
-			content: item.assistantMessage.content.map(publicAssistantBlock),
-		},
+		assistantMessage: { ...item.assistantMessage, content },
+		toolResults,
+		metadata,
 	};
 }

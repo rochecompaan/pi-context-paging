@@ -222,13 +222,18 @@ The compact references retain their 8,000-character limit, even when search also
 
 Recovery tools exclude assistant thinking blocks, redacted thinking payloads, and provider signatures.
 Search does not index these values, and previews do not show them.
-Only assistant text and tool-call blocks enter the recovery view.
+Only public assistant text and ordinary tool-call blocks enter the recovery view.
 Unknown assistant block types also stay out of this view.
+
+All four recovery tools exclude their own calls and results from search, browse, load, and output pages.
+Turns with only paging activity do not appear in recovery.
+Mixed turns retain their public assistant text and ordinary work.
+Their tool, file, and failure filters describe only the retained work, including any interrupted response.
 
 Loaded assistant content uses `null` for each omitted block.
 These slots preserve the original array indices.
 The page reader uses those original `contentIndex` values and rejects reads of omitted blocks.
-It also rejects results from the four recovery tools, because older saved replies can contain private assistant data.
+It also rejects calls and results from the four recovery tools. Older saved replies can contain private assistant data.
 The original history item remains the source for public output.
 
 This filter does not change stored history or the normal provider-message format.

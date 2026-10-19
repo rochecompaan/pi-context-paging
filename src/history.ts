@@ -100,7 +100,7 @@ function collectFiles(value: unknown, files: string[], seen: Set<string>): void 
 	}
 }
 
-function metadataFor(message: AssistantMessage, results: ToolResultMessage[], interruptedByRestore = false): HistoryMetadata {
+export function metadataFor(message: AssistantMessage, results: ToolResultMessage[], interruptedByRestore = false): HistoryMetadata {
 	const files: string[] = [];
 	const seenFiles = new Set<string>();
 	const calls = toolCalls(message);

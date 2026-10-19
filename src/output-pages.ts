@@ -1,5 +1,5 @@
-import { PAGING_TOOL_NAMES, type HistoryItem, type ModelTurnHistoryItem } from "./history.ts";
-import { publicAssistantBlock } from "./recovery-content.ts";
+import type { HistoryItem, ModelTurnHistoryItem } from "./history.ts";
+import { recoveryHistoryItem } from "./recovery-content.ts";
 
 export const MAXIMUM_OUTPUT_PAGE_CHARACTERS = 2_000;
 
@@ -62,11 +62,14 @@ function modelTurn(items: readonly HistoryItem[], historyId: string): ModelTurnH
 }
 
 function selectedOutput(turn: ModelTurnHistoryItem, input: ContextOutputReadInput): unknown {
+	const item = recoveryHistoryItem(turn);
+	const recovery = item?.kind === "modelTurn" ? item : undefined;
 	if (input.source === "assistant") {
-		const stored = turn.assistantMessage.content[input.contentIndex!];
-		if (stored === undefined) throw new Error(`Unknown assistant content index ${input.contentIndex}.`);
-		const block = publicAssistantBlock(stored);
-		if (block === null) {
+		if (turn.assistantMessage.content[input.contentIndex!] === undefined) {
+			throw new Error(`Unknown assistant content index ${input.contentIndex}.`);
+		}
+		const block = recovery?.assistantMessage.content[input.contentIndex!];
+		if (block == null) {
 			throw new Error(`Assistant content index ${input.contentIndex} is not public recovery output.`);
 		}
 		return block;
@@ -74,8 +77,7 @@ function selectedOutput(turn: ModelTurnHistoryItem, input: ContextOutputReadInpu
 	const result = turn.toolResults.find((candidate) => candidate.toolCallId === input.toolCallId);
 	if (result === undefined) throw new Error(`Unknown tool-result toolCallId ${input.toolCallId}.`);
 	// Older saved recovery replies can contain serialized private blocks.
-	const call = turn.assistantMessage.content.find((block) => block.type === "toolCall" && block.id === input.toolCallId);
-	if (PAGING_TOOL_NAMES.some((name) => name === result.toolName || (call?.type === "toolCall" && name === call.name))) {
+	if (!recovery?.toolResults.includes(result)) {
 		throw new Error("Recovery-tool output is not available. Read the original history item instead.");
 	}
 	return result;

@@ -1,7 +1,8 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type { AssistantMessage } from "@earendil-works/pi-ai";
+import type { AssistantMessage, ToolResultMessage } from "@earendil-works/pi-ai";
 import type { HistoryItem } from "./history.ts";
 import type { ContextCutKey } from "./context-cut.ts";
+import { isRecoverableHistoryItem, pagingToolCallIds } from "./recovery-content.ts";
 
 type ModelTurnHistoryItem = Extract<HistoryItem, { kind: "modelTurn" }>;
 type ToolCallBlock = Extract<AssistantMessage["content"][number], { type: "toolCall" }>;
@@ -60,6 +61,22 @@ export class SelectionHistoryLookup {
 		if (!bucket) return undefined;
 		const serialized = this.serialize(message);
 		return this.serializedIds(bucket).get(serialized);
+	}
+
+	recoverableId(historyId: string | undefined): string | undefined {
+		const item = historyId === undefined ? undefined : this.uniqueItems.get(historyId);
+		return item && isRecoverableHistoryItem(item) ? item.id : undefined;
+	}
+
+	recoveryHistoryId(message: AgentMessage): string | undefined {
+		return this.recoverableId(this.historyId(message));
+	}
+
+	recoveryToolTurn(message: ToolResultMessage): ModelTurnHistoryItem | undefined {
+		const turn = this.toolTurn(message);
+		return turn && this.recoverableId(turn.id) !== undefined
+			&& !pagingToolCallIds(turn.assistantMessage, turn.toolResults).has(message.toolCallId)
+			&& turn.toolResults.some((result) => result.toolCallId === message.toolCallId) ? turn : undefined;
 	}
 
 	/** Unlike recovery lookup, cut provenance never guesses from a reused call ID. */

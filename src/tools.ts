@@ -126,7 +126,7 @@ export function registerContextPagingTools(
 	pi.registerTool({
 		name: "read_context_output",
 		label: "Read Context Output",
-		description: "read_context_output returns one exact public recovery output page using original assistant contentIndex values. Non-public blocks and recovery-tool results are unavailable. Repeat read_context_output with nextOffset until nextOffset is null.",
+		description: "read_context_output returns one exact public recovery output page using original assistant contentIndex values. Non-public blocks and paging-tool calls and results are unavailable. Repeat read_context_output with nextOffset until nextOffset is null.",
 		parameters: readContextOutputParameters,
 		async execute(_toolCallId, params: ContextOutputReadInput, _signal, _onUpdate, ctx) {
 			const current = snapshot(dependencies, ctx);

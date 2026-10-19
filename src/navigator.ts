@@ -1,4 +1,4 @@
-import { isPagingToolTurn, type HistoryItem } from "./history.ts";
+import type { HistoryItem } from "./history.ts";
 import { recoveryHistoryItem, type RecoveryHistoryItem } from "./recovery-content.ts";
 
 const K1 = 1.2;
@@ -183,8 +183,9 @@ export class HistoryNavigator {
 
 	rebuild(items: readonly HistoryItem[]): void {
 		this.items = items
-			.filter((item) => !isPagingToolTurn(item))
-			.map((item, sequence) => ({ ...recoveryHistoryItem(item), sequence }));
+			.map(recoveryHistoryItem)
+			.filter((item): item is RecoveryHistoryItem => item !== undefined)
+			.map((item, sequence) => ({ ...item, sequence }));
 		this.itemById = new Map(this.items.map((item) => [item.id, item]));
 		this.itemBySequence = new Map(this.items.map((item) => [item.sequence, item]));
 		this.references = this.items.map((item, index) => buildReference(item, index, this.items));

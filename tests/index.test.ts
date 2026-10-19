@@ -699,12 +699,11 @@ test("refreshes lifecycle history and reuses navigation until visible history ch
 		assert.deepEqual(await searchIds(harness, "visible"), ["user-visible"]);
 		assert.equal(rebuilds, 1);
 		const read = harness.tools.find((tool) => tool.name === "read_context_output");
-		const output = await read.execute("call", {
+		await assert.rejects(() => read.execute("call", {
 			historyId: "paging-assistant",
 			source: "assistant",
 			contentIndex: 0,
-		}, undefined, undefined, harness.ctx);
-		assert.match(output.details.text, /search_history/);
+		}, undefined, undefined, harness.ctx), /not public recovery output/i);
 
 		harness.setBranch(branchFor("replacement"));
 		await emit(harness, "session_tree", {});

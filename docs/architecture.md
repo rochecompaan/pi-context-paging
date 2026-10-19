@@ -20,8 +20,11 @@ Failed text-only responses also remain in raw history.
 ## History navigation
 
 `recovery-content.ts` creates a public recovery view without changing raw branch items.
-It permits assistant text and tool-call blocks, with provider signatures removed.
-Thinking, redacted thinking, and unknown assistant blocks become `null` slots.
+It permits public assistant text and ordinary tool-call blocks, with provider signatures removed.
+All four paging tools' calls and results stay out of recovery. Both stored call names and result names identify excluded activity.
+Paging-only turns are hidden. Mixed turns retain ordinary work and assistant text.
+Mixed-turn metadata is rebuilt from retained calls and results, preserving interrupted-response and restore failure status.
+Thinking, redacted thinking, unknown assistant blocks, and paging calls become `null` slots.
 These slots preserve original assistant content indices.
 User content, tool arguments, and ordinary tool results remain exact.
 The filter does not recursively remove application-owned fields or text.
@@ -38,8 +41,8 @@ Load returns public items atomically.
 `output-pages.ts` addresses the raw projection with original assistant indices.
 It applies the same public-block filter before serialization and rejects omitted blocks.
 Ordinary tool-result output remains exact.
-The page reader rejects recovery-tool results, including older replies that can contain serialized private data.
-It checks both the stored call name and the result name.
+The page reader uses the same recovery view as navigation and rejects paging calls and results.
+Older paging replies can contain serialized private data.
 
 The reader returns bounded character pages and an exact next offset for public JSON.
 It never replaces large values with a summary.
@@ -168,12 +171,16 @@ The stats action does not refresh navigation, reset accounting, publish footer s
 
 A transient paging notice appears before retained canonical messages after eviction.
 The notice reports the effective budget and gives stable recovery references.
+References identify recoverable evicted items and ordinary tool results, not excluded paging activity.
+When no evicted item is recoverable, the notice omits specific handles.
+The raw eviction boundary remains independent of these references.
 Normal selection reuses its exact content and timestamp until a frontier advance or reset changes its references.
 The notice contributes to both the budget trigger and the cut destination. It is not written into stored session history.
 
 For append-only history and stable resident input, ordinary requests preserve the previous outgoing request as a prefix between advances.
 This guarantee includes the completion of a partial turn. It excludes other extensions' message edits and non-append input changes.
 Protected-overflow replaces the leading notice. Recovery also replaces recoverable tool-result payloads.
+Oversized unread paging results receive short exclusion notices, not unreadable recovery handles. Their live call/result pairing remains intact.
 Entry into or exit from these modes can change the prefix without a frontier advance.
 When normal paging resumes, its frozen notice returns unchanged. Part 1 does not make every provider call append-only.
 
