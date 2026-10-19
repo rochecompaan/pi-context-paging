@@ -184,7 +184,7 @@ test("returns no items when loading a search with no matches", async () => {
 	});
 });
 
-test("limits compact replies but not exact loads", async () => {
+test("defers oversized reference metadata and loads without losing the history ID", async () => {
 	const large = turn("large", 0, "needle");
 	if (large.kind === "modelTurn") {
 		large.metadata.files = Array.from({ length: 50 }, (_, index) => `src/${index}-${"x".repeat(200)}.ts`);
@@ -194,11 +194,20 @@ test("limits compact replies but not exact loads", async () => {
 	const browse = tool(tools, "browse_history");
 	const load = tool(tools, "load_history");
 
-	await assert.rejects(() => execute(search, { query: "needle" }), /8,000/);
-	await assert.rejects(() => execute(search, { query: "needle", load: true }), /8,000/);
-	await assert.rejects(() => execute(browse, { direction: "forward" }), /8,000/);
-	const exact = await execute(load, { historyIds: ["large"] });
-	assert.equal(JSON.stringify(details(exact)).length > 8_000, true);
+	for (const [registeredTool, params] of [
+		[search, { query: "needle" }],
+		[search, { query: "needle", load: true }],
+		[browse, { direction: "forward" }],
+	] as const) {
+		const reply = await execute(registeredTool, params);
+		assert.ok(Buffer.byteLength(JSON.stringify(reply), "utf8") <= 16_384);
+		assert.equal(detailReferences(details(reply))[0].historyId, "large");
+	}
+	const loaded = await execute(load, { historyIds: ["large"] });
+	assert.ok(Buffer.byteLength(JSON.stringify(loaded), "utf8") <= 16_384);
+	assert.equal((details(loaded).items as any[])[0].deferred, true);
+	const page = details(await execute(tool(tools, "read_context_output"), { historyId: "large", part: "/metadata" }));
+	assert.ok(typeof page.text === "string" && page.text.includes("src/0-"));
 });
 
 test("reads exact output pages repeatedly through nextOffset", async () => {

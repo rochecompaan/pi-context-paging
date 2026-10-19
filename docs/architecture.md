@@ -32,20 +32,40 @@ The filter does not recursively remove application-owned fields or text.
 `navigator.ts` builds compact search records from this public view.
 Search and previews skip the omitted slots.
 Search serializes large tool output only when a query needs it.
+Native image blocks contribute metadata, not base64, to search text and previews.
 The navigator caches that corpus until visible history IDs change.
 Browse uses stable history IDs and sequence numbers.
-Load returns public items atomically.
+The navigator loads public items for internal callers. The tool boundary limits what returns to the model.
 
 ## Exact output paging
 
-`output-pages.ts` addresses the raw projection with original assistant indices.
-It applies the same public-block filter before serialization and rejects omitted blocks.
-Ordinary tool-result output remains exact.
-The page reader uses the same recovery view as navigation and rejects paging calls and results.
+`recovery-parts.ts` selects parts from the public projection with JSON Pointer paths.
+It lists individual message blocks, tool-result details, and model-turn metadata.
+A root handle also covers headers and other public fields.
+Selection accepts only own properties and preserves original assistant indices.
+It rejects omitted assistant slots and does not permit traversal into image data fields.
+Paging-only turns and excluded calls and results remain unavailable.
+
+Image blocks become metadata with explicit attachment handles during text serialization.
+Text-only values retain their exact JSON representation.
+An explicit image read returns one native Pi image block. Its bytes never enter text or `details`.
+The image attachment is exempt from the text limit. Normal provider image limits still apply.
+
+`recovery-response.ts` limits the complete serialized text result to 16,384 UTF-8 bytes.
+It counts `content`, `details`, metadata, and JSON escaping before return.
+`recovery-loads.ts` reserves every requested ID and continuation before adding inline content.
+Public items at most 4,096 serialized bytes can remain whole if the shared reply budget permits.
+Larger items and items that do not fit return bounded part descriptions and explicit deferred markers.
+Oversized reference metadata is also deferred without dropping its history ID.
+Part lists have their own offsets and continuations when all descriptions do not fit.
+
+`output-pages.ts` supports public part handles and the original assistant and tool-result selectors.
+It returns exact JSON ranges of at most 2,000 requested UTF-16 code units, shortened for the reply byte limit.
+Page boundaries never split surrogate pairs. The cursor advances by the actual returned length.
+The reader uses the same recovery view as navigation and rejects paging calls and results.
 Older paging replies can contain serialized private data.
 
-The reader returns bounded character pages and an exact next offset for public JSON.
-It never replaces large values with a summary.
+No recovery tool summarizes large values.
 Raw session storage and normal provider-message handling remain unchanged.
 
 ## Settings and limits

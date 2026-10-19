@@ -203,10 +203,11 @@ Session shutdown removes the status key. Headless sessions do not call the statu
 | `search_history` | Find compact references to history by text, file, tool, or failure state. |
 | `browse_history` | Move backward, forward, or around one history item. |
 | `load_history` | Load public history items by stable ID. |
-| `read_context_output` | Read exact pages of public assistant or ordinary tool-result output. |
+| `read_context_output` | Read public text parts, list more parts, or request one native image attachment. |
 
 Search and browse return compact references to public content.
 Load and read preserve exact public text, tool-call data, and ordinary tool results.
+Images use metadata and explicit attachment requests instead of base64 text.
 The tools never summarize.
 When paging is disabled, the tools refuse to run.
 
@@ -216,7 +217,47 @@ It ignores punctuation around identifiers but preserves separators inside identi
 With `load: true`, `search_history` returns all requested `references` and loads at most three `items`.
 The `unloadedHistoryIds` array lists the other matches in search order.
 Use `load_history` to load those IDs, at most three per call.
-The compact references retain their 8,000-character limit, even when search also loads items.
+### Reply limits and large items
+
+Every text reply has a 16 KiB limit, measured as serialized UTF-8 bytes.
+This limit includes `content`, `details`, metadata, and JSON escaping.
+An item stays whole only when its public body is at most 4 KiB and fits the shared reply budget.
+A large item does not prevent a later small item from loading.
+
+A deferred item contains `id`, `kind`, `deferred: true`, and part descriptions with read handles.
+It also contains `totalParts`, `nextPartOffset`, and a `readParts` handle.
+If `nextPartOffset` is not `null`, pass `readParts` to `read_context_output` to get the next descriptions.
+Repeat with the returned `nextOffset` until it is `null`.
+To list every part from the start, use `mode: "parts"` with `offset: 0`.
+Oversized reference metadata becomes `{ historyId, detailsDeferred: true }`. The ID remains loadable.
+
+Each part handle contains a `historyId` and a `part` path into the public item.
+For example, this call reads a stored user string:
+
+```json
+{"historyId":"abc123","part":"/userMessage/content"}
+```
+
+Default text mode returns exact JSON ranges, with `offset`, `nextOffset`, and `totalCharacters`.
+Offsets count UTF-16 code units, as JavaScript string offsets do.
+Each page contains at most the requested `limit`, up to 2,000 code units.
+The byte limit can shorten a page. Pages never split a Unicode surrogate pair.
+If the next character needs two code units and `limit` is one, increase `limit`.
+Repeat with `nextOffset` to recover the full value without gaps.
+The older `source: "assistant"` and `source: "toolResult"` selectors still work.
+Do not combine these selectors with a `part` handle.
+
+### Images
+
+Image parts contain metadata and a read handle with `mode: "image"`.
+Pass that handle to `read_context_output` to receive one native Pi image attachment.
+The image bytes do not enter text replies, search previews, or `details`.
+Text reads of image-containing values return image metadata with attachment handles instead of base64.
+
+The 16 KiB limit applies to the image response's text and metadata, not its native attachment.
+Each request returns at most one image. Normal provider image limits still apply.
+Image mode does not accept text-page offsets or limits.
+This feature does not export original files, resize images, or crop them.
 
 ### Private assistant content
 

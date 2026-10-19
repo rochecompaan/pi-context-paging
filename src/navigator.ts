@@ -1,5 +1,6 @@
 import type { HistoryItem } from "./history.ts";
 import { recoveryHistoryItem, type RecoveryHistoryItem } from "./recovery-content.ts";
+import { isRecoveryImage } from "./recovery-parts.ts";
 
 const K1 = 1.2;
 const B = 0.75;
@@ -68,6 +69,7 @@ function contentText(content: unknown): string {
 	if (!Array.isArray(content)) return serialized(content);
 	return content.flatMap((block) => {
 		if (block === null) return [];
+		if (isRecoveryImage(block)) return [`[Image: ${block.mimeType}]`];
 		if (typeof block === "object" && block.type === "text" && typeof block.text === "string") {
 			return [block.text];
 		}
