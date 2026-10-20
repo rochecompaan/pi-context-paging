@@ -4,6 +4,7 @@ import { isRecoveryImage } from "./recovery-parts.ts";
 
 const K1 = 1.2;
 const B = 0.75;
+const TERM_PATTERN = /\p{Script=Han}|[\p{L}\p{N}_./:-]+/gu;
 
 export type HistorySearchInput = {
 	query: string;
@@ -50,13 +51,17 @@ export class HistoryNavigatorError extends Error {
 }
 
 type SearchDocument = {
+	text: string;
 	terms: Map<string, number>;
 	length: number;
 };
 
+function normalizeTerm(term: string): string {
+	return term.replace(/^[./:-]+|[./:-]+$/g, "");
+}
+
 function tokenize(text: string): string[] {
-	const terms = text.toLowerCase().match(/\p{Script=Han}|[\p{L}\p{N}_./:-]+/gu) ?? [];
-	return terms.map((term) => term.replace(/^[./:-]+|[./:-]+$/g, "")).filter(Boolean);
+	return (text.toLowerCase().match(TERM_PATTERN) ?? []).map(normalizeTerm).filter(Boolean);
 }
 
 function serialized(value: unknown): string {
@@ -100,6 +105,47 @@ function itemText(item: RecoveryHistoryItem): string {
 function previewFor(item: RecoveryHistoryItem): string {
 	const content = item.kind === "user" ? item.userMessage.content : item.assistantMessage.content;
 	return contentText(content).replace(/\s+/g, " ").trim().slice(0, 160);
+}
+
+// Lowercasing can expand characters, such as İ, so folded offsets are not always source offsets.
+function originalRange(text: string, start: number, end: number): [number, number] {
+	let folded = 0;
+	let original = 0;
+	let originalStart = 0;
+	for (const point of text) {
+		const next = folded + point.toLowerCase().length;
+		if (folded <= start && start < next) originalStart = original;
+		original += point.length;
+		if (next >= end) return [originalStart, original];
+		folded = next;
+	}
+	return [originalStart, original];
+}
+
+function excerptAround(text: string, matchStart: number, matchEnd: number): string {
+	const maximum = 160;
+	if (text.length <= maximum) return text;
+	const width = maximum - 2; // Reserve space for both ellipses.
+	const before = Math.max(0, Math.floor((width - (matchEnd - matchStart)) / 2));
+	const start = Math.min(Math.max(0, matchStart - before), text.length - width);
+	const end = Math.min(text.length, start + width);
+	const excerpt = text.slice(start, end).replace(/^[\uDC00-\uDFFF]|[\uD800-\uDBFF]$/gu, "");
+	return `${start > 0 ? "…" : ""}${excerpt}${end < text.length ? "…" : ""}`;
+}
+
+function searchPreview(text: string, queryTerms: readonly string[]): string | undefined {
+	const compact = text.replace(/\s+/g, " ").trim();
+	const folded = compact.toLowerCase();
+	const wanted = new Set(queryTerms);
+	for (const match of folded.matchAll(TERM_PATTERN)) {
+		const term = normalizeTerm(match[0]);
+		if (!wanted.has(term)) continue;
+		let start = match.index + match[0].indexOf(term);
+		let end = start + term.length;
+		if (folded.length !== compact.length) [start, end] = originalRange(compact, start, end);
+		return excerptAround(compact, start, end);
+	}
+	return undefined;
 }
 
 function buildReference(item: RecoveryHistoryItem, index: number, items: readonly RecoveryHistoryItem[]): HistoryReference {
@@ -212,7 +258,11 @@ export class HistoryNavigator {
 			.filter(({ item, score }) => score !== undefined && this.matchesFilters(item, input))
 			.sort((left, right) => (right.score ?? 0) - (left.score ?? 0) || left.item.sequence - right.item.sequence)
 			.slice(0, limit)
-			.map(({ index }) => this.references[index]);
+			.map(({ index }) => {
+				const reference = this.references[index];
+				if (queryTerms.length === 0) return reference;
+				return { ...reference, preview: searchPreview(searchDocuments[index].text, queryTerms) ?? reference.preview };
+			});
 	}
 
 	browse(input: HistoryBrowseInput): HistoryReference[] {
@@ -252,10 +302,11 @@ export class HistoryNavigator {
 	private buildSearchIndex(): SearchDocument[] {
 		this.documentFrequencies = new Map();
 		this.searchDocuments = this.items.map((item) => {
+			const text = itemText(item);
 			const terms = new Map<string, number>();
-			for (const term of tokenize(itemText(item))) terms.set(term, (terms.get(term) ?? 0) + 1);
+			for (const term of tokenize(text)) terms.set(term, (terms.get(term) ?? 0) + 1);
 			for (const term of terms.keys()) this.documentFrequencies.set(term, (this.documentFrequencies.get(term) ?? 0) + 1);
-			return { terms, length: [...terms.values()].reduce((sum, frequency) => sum + frequency, 0) };
+			return { text, terms, length: [...terms.values()].reduce((sum, frequency) => sum + frequency, 0) };
 		});
 		this.averageDocumentLength = this.searchDocuments.length === 0
 			? 0

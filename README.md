@@ -213,6 +213,10 @@ When paging is disabled, the tools refuse to run.
 
 Search indexes actual public text, including words after newlines.
 It ignores punctuation around identifiers but preserves separators inside identifiers and paths.
+A text query returns a short excerpt around the first matching term in the public search text.
+This can show matching tool output instead of the start of the assistant response.
+An ellipsis (`…`) marks a clipped end.
+Browse previews and empty-query search previews still start at the beginning.
 
 The `tools` filter matches any listed tool name.
 For example, `tools: ["bash", "codemode"]` matches a turn that used either tool, or both.

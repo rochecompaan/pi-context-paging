@@ -94,7 +94,7 @@ export function registerContextPagingTools(
 	pi.registerTool({
 		name: "search_history",
 		label: "Search History",
-		description: "search_history finds public recovery references in paged session history. With load:true, it loads up to three items and lists unloadedHistoryIds without dropping references. Text replies are capped at 16 KiB including details. Large items return deferred parts and read handles, not full bodies. Use load_history or read_context_output to follow them.",
+		description: "search_history finds public recovery references in paged session history. Query previews show context around a matching search term, including public tool output. With load:true, it loads up to three items and lists unloadedHistoryIds without dropping references. Text replies are capped at 16 KiB including details. Large items return deferred parts and read handles, not full bodies. Use load_history or read_context_output to follow them.",
 		parameters: searchHistoryParameters,
 		async execute(_toolCallId, params: SearchHistoryInput, _signal, _onUpdate, ctx) {
 			const current = snapshot(dependencies, ctx);
