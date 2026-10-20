@@ -214,6 +214,12 @@ When paging is disabled, the tools refuse to run.
 Search indexes actual public text, including words after newlines.
 It ignores punctuation around identifiers but preserves separators inside identifiers and paths.
 
+The `tools` filter matches any listed tool name.
+For example, `tools: ["bash", "codemode"]` matches a turn that used either tool, or both.
+An omitted or empty list adds no tool restriction.
+The text query and other filters still apply.
+The `files` filter requires every listed file.
+
 With `load: true`, `search_history` returns all requested `references` and loads at most three `items`.
 The `unloadedHistoryIds` array lists the other matches in search order.
 Use `load_history` to load those IDs, at most three per call.

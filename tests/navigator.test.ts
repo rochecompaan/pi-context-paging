@@ -90,6 +90,60 @@ test("search is case-insensitive, ranks content, tool names, and file-like argum
 	);
 });
 
+for (const { tools, expected } of [
+	{ tools: ["bash", "codemode"], expected: ["bash-only", "both", "codemode-only"] },
+	{ tools: ["missing", "codemode"], expected: ["both", "codemode-only"] },
+	{ tools: ["missing"], expected: [] },
+	{ tools: ["bash"], expected: ["bash-only", "both"] },
+]) {
+	test(`search tool filter matches any listed tool: ${tools.join(", ")}`, () => {
+		const navigator = new HistoryNavigator([
+			userItem("user", 0, "needle"),
+			turnItem("no-tools", 1, "needle", [], [], false),
+			turnItem("bash-only", 2, "needle", ["bash"], [], false),
+			turnItem("codemode-only", 3, "needle", ["codemode"], [], false),
+			turnItem("both", 4, "needle", ["bash", "codemode"], [], false),
+			turnItem("read-only", 5, "needle", ["read"], [], false),
+		]);
+
+		assert.deepEqual(ids(navigator.search({ query: "needle", tools, limit: 10 })).sort(), expected);
+	});
+}
+
+test("empty and omitted tool filters retain matching user and tool-free assistant items", () => {
+	const navigator = new HistoryNavigator([
+		userItem("user", 0, "needle"),
+		turnItem("no-tools", 1, "needle", [], [], false),
+		turnItem("bash", 2, "needle", ["bash"], [], false),
+		userItem("unrelated", 3, "other"),
+	]);
+
+	for (const tools of [undefined, []]) {
+		assert.deepEqual(ids(navigator.search({ query: "needle", tools })).sort(), ["bash", "no-tools", "user"]);
+	}
+});
+
+test("tool alternatives still require the query, every listed file, and the failure filter", () => {
+	const navigator = new HistoryNavigator([
+		turnItem("bash-match", 0, "needle", ["bash"], ["src/a.ts", "src/b.ts"], true),
+		turnItem("codemode-match", 1, "needle", ["codemode"], ["src/a.ts", "src/b.ts"], true),
+		turnItem("wrong-query", 2, "other", ["bash"], ["src/a.ts", "src/b.ts"], true),
+		turnItem("missing-file", 3, "needle", ["codemode"], ["src/a.ts"], true),
+		turnItem("wrong-failure", 4, "needle", ["bash"], ["src/a.ts", "src/b.ts"], false),
+		turnItem("wrong-tool", 5, "needle", ["read"], ["src/a.ts", "src/b.ts"], true),
+	]);
+
+	const references = navigator.search({
+		query: "needle",
+		tools: ["bash", "codemode"],
+		files: ["src/a.ts", "src/b.ts"],
+		failed: true,
+		limit: 10,
+	});
+
+	assert.deepEqual(ids(references).sort(), ["bash-match", "codemode-match"]);
+});
+
 test("search handles Unicode terms and never treats tokenless input as a match-all query", () => {
 	const navigator = new HistoryNavigator([
 		userItem("unicode", 0, "请分页显示历史记录"),

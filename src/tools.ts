@@ -24,7 +24,10 @@ const strictObject = <T extends TProperties>(properties: T) =>
 const searchHistoryParameters = strictObject({
 	query: Type.String({ maxLength: 200 }),
 	files: Type.Optional(Type.Array(Type.String({ maxLength: 200 }), { maxItems: 10 })),
-	tools: Type.Optional(Type.Array(Type.String({ maxLength: 200 }), { maxItems: 10 })),
+	tools: Type.Optional(Type.Array(Type.String({ maxLength: 200 }), {
+		maxItems: 10,
+		description: "Match any listed tool name. Omit or pass an empty list for no tool restriction.",
+	})),
 	failed: Type.Optional(Type.Boolean()),
 	limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 10, default: 5 })),
 	load: Type.Optional(Type.Boolean()),

@@ -283,7 +283,7 @@ export class HistoryNavigator {
 	private matchesFilters(item: RecoveryHistoryItem, input: HistorySearchInput): boolean {
 		const metadata = item.kind === "modelTurn" ? item.metadata : { tools: [], files: [], failed: false };
 		return (input.files === undefined || input.files.every((file) => metadata.files.includes(file)))
-			&& (input.tools === undefined || input.tools.every((tool) => metadata.tools.includes(tool)))
+			&& (input.tools === undefined || input.tools.length === 0 || input.tools.some((tool) => metadata.tools.includes(tool)))
 			&& (input.failed === undefined || input.failed === metadata.failed);
 	}
 
