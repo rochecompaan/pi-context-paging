@@ -11,7 +11,8 @@ import {
 } from "./context-policy.ts";
 import { ContextUsageTracker } from "./context-usage.ts";
 import { ContextCutState } from "./context-cut.ts";
-import { isInterruptedAssistantMessage, projectActiveBranch, type HistoryItem } from "./history.ts";
+import { isInterruptedAssistantMessage, projectActiveBranchIncremental, type HistoryItem, type ProjectionWatermark } from "./history.ts";
+import { historyItemKeyResolver, MessageCostCache } from "./context-costs.ts";
 import { isRecoverableHistoryItem } from "./recovery-content.ts";
 import { HistoryNavigator } from "./navigator.ts";
 import { registerContextPagingTools, type HistorySnapshot } from "./tools.ts";
@@ -124,14 +125,18 @@ export default function contextPagingExtension(
 	};
 	let allItems: HistoryItem[] = [];
 	const navigator = new HistoryNavigator();
-	const usageTracker = new ContextUsageTracker();
+	const messageCosts = new MessageCostCache();
+	const usageTracker = new ContextUsageTracker(messageCosts);
 	const cutState = new ContextCutState();
+	let projectionWatermark: ProjectionWatermark | undefined;
 	let latestInput: InputTokenCount | undefined;
 	let pendingRotation: { trimToTokens?: number } | undefined;
 	const warnedSettingPairs = new Set<string>();
 	const resetPagingState = () => {
 		usageTracker.clear();
 		cutState.reset();
+		messageCosts.clear();
+		projectionWatermark = undefined;
 		latestInput = undefined;
 		pendingRotation = undefined;
 	};
@@ -159,9 +164,11 @@ export default function contextPagingExtension(
 		// Keep saved event IDs even before the branch view exposes their entries.
 		for (const id of edits.invalidating) invalidatingBranchEntries.add(id);
 		for (const id of edits.omittedFailures) omittedFailureEntries.add(id);
-		const projected = projectActiveBranch(branch, {
+		const projection = projectActiveBranchIncremental(branch, projectionWatermark, {
 			recoverIncomplete: restoring, interruptedEntryIds: restoredInterruptedEntryIds,
 		});
+		projectionWatermark = projection.watermark;
+		const projected = projection.items;
 		if (restoring) restoredInterruptedEntryIds = new Set(projected
 			.filter((item) => item.kind === "modelTurn" && item.interruptedByRestore)
 			.map((item) => item.id));
@@ -306,6 +313,7 @@ export default function contextPagingExtension(
 			canonicalSessionMessages = undefined;
 			ctx.ui.notify(`Context paging history is unavailable: ${errorMessage(error)}`, "error");
 		}
+		usageTracker.bindKeys(rawHistoryItems ? historyItemKeyResolver(rawHistoryItems) : undefined);
 
 		// The rotation stays queued until selection succeeds, so an aborted provider call does not lose it.
 		const rotation = pendingRotation;
