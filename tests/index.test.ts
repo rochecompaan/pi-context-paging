@@ -1343,3 +1343,59 @@ test("a filtered remembered exchange clears fallback state and can rebuild the s
 	assert.equal(hasMarker(rebuilt.messages, "result-live-1 payload"), false);
 	assert.equal(harness.abortCalls(), 0);
 });
+
+test("pages each model against its own model budget", async () => {
+	const harness = createHarness({
+		globalSettings: { contextPaging: { enabled: true, modelOverrides: { "small/model": { tokenBudget: 300 } } } },
+		projectTrusted: false,
+	});
+	const old = user(`OLD ${"x".repeat(2_000)}`);
+	const actual = user("ACTUAL");
+	const selectFor = async (provider: string) => {
+		const model = { provider, id: "model", contextWindow: 64_000 };
+		harness.ctx.model = model;
+		await emit(harness, "model_select", { model });
+		harness.setBranch([entry("old", old), entry("actual", actual)]);
+		return (await emit(harness, "context", { messages: [old, actual] }) as any).messages;
+	};
+	assert.equal(hasMarker(await selectFor("small"), "OLD"), false);
+	assert.equal(hasMarker(await selectFor("large"), "OLD"), true);
+	assert.equal(hasMarker(await selectFor("small"), "OLD"), false);
+});
+
+test("names a model override in status only when it sets enabled", async () => {
+	const harness = createHarness({
+		globalSettings: {
+			contextPaging: { modelOverrides: { "a/budget": { tokenBudget: 300 }, "a/off": { enabled: false } } },
+		},
+		projectTrusted: false,
+	});
+	for (const id of ["budget", "off"]) {
+		const model = { provider: "a", id, contextWindow: 64_000 };
+		harness.ctx.model = model;
+		await emit(harness, "model_select", { model });
+		await runPagingCommand(harness, "status");
+	}
+	assert.deepEqual(harness.notifications.slice(-2).map((item) => item.message), [
+		"Context paging is enabled for this session.",
+		"Context paging is disabled for a/off by its model override.",
+	]);
+});
+
+test("sizes an auto budget from the running model window", async () => {
+	const harness = createHarness({
+		globalSettings: { contextPaging: { enabled: true, tokenBudget: "auto:0.5" } },
+		projectTrusted: false,
+	});
+	const old = user(`OLD ${"x".repeat(2_000)}`);
+	const actual = user("ACTUAL");
+	const selectFor = async (id: string, contextWindow: number) => {
+		const model = { provider: "p", id, contextWindow };
+		harness.ctx.model = model as any;
+		await emit(harness, "model_select", { model });
+		harness.setBranch([entry("old", old), entry("actual", actual)]);
+		return (await emit(harness, "context", { messages: [old, actual] }) as any).messages;
+	};
+	assert.equal(hasMarker(await selectFor("small", 600), "OLD"), false);
+	assert.equal(hasMarker(await selectFor("large", 64_000), "OLD"), true);
+});

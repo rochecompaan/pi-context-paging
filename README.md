@@ -106,9 +106,9 @@ To change these values, add this object to `~/.pi/agent/settings.json` or to a t
 | Setting | Meaning | Default |
 | --- | --- | --- |
 | `enabled` | Set this to `false` to stop paging and the recovery tools. | `true` |
-| `tokenBudget` | The largest request size, in estimated tokens. A larger request causes a cut. | `128000` |
+| `tokenBudget` | The largest request size, in estimated tokens. A larger request causes a cut. Use `"auto"` or `"auto:<ratio>"` to size it from the active model's context window. | `128000` |
 | `trimToTokens` | The request size that a cut trims to. | 5/8 of the budget |
-| `modelOverrides` | Per-model `enabled` values, keyed by exact `provider/modelId`. | None |
+| `modelOverrides` | Per-model `enabled`, `tokenBudget`, and `trimToTokens` values, keyed by exact `provider/modelId`. | None |
 
 A trusted project setting takes precedence over the global setting.
 The extension ignores project settings in untrusted projects.
@@ -117,25 +117,51 @@ The extension ignores project settings in untrusted projects.
 
 Paging helps only a model that calls the recovery tools.
 A model that ignores them loses the paged-out history and reads the same files again.
-Use `modelOverrides` to turn paging off for that model only:
+Use `modelOverrides` to turn paging off for that model only.
+Models also get worse at different context sizes, so an override can set its own budget too:
 
 ```json
 {
   "contextPaging": {
     "modelOverrides": {
-      "openrouter/deepseek/deepseek-v4.1-flash": { "enabled": false }
+      "openrouter/deepseek/deepseek-v4.1-flash": { "enabled": false },
+      "xai/grok-4.7": { "tokenBudget": 200000 }
     }
   }
 }
 ```
 
+### Automatic budget
+
+Set `tokenBudget` to `"auto"` to make the budget half of the active model's context window.
+Use `"auto:<ratio>"` to choose another fraction from above 0 to 1. For example, `"auto:0.4"` with a 1,000,000-token window gives a 400,000-token budget.
+The extension reads the window of the running model at each request, so the budget follows every `/model` change.
+If the window is unknown, the budget is 128,000.
+Without `trimToTokens`, the target is 5/8 of the computed budget.
+
+```json
+{
+  "contextPaging": {
+    "tokenBudget": "auto",
+    "modelOverrides": {
+      "xai/grok-4.7": { "tokenBudget": "auto:0.25" }
+    }
+  }
+}
+```
+
+The window does not show where a model starts to get worse.
+For a model with a large window, a small ratio or a fixed budget keeps it out of the dumb zone.
+
 The key is the exact `provider/modelId` of the model, as `/model` shows it.
-An override sets only `enabled`. The token budget and target stay shared.
-A trusted project override replaces the global override for the same model. Other global overrides still apply.
-An override that is not an object with a boolean `enabled` does not apply.
+An override can set `enabled`, `tokenBudget`, and `trimToTokens`. A field that the override omits uses the top-level setting.
+If an override sets `tokenBudget` (a number or `"auto"`) but not `trimToTokens`, the target is 5/8 of that model budget, not the top-level `trimToTokens`.
+A trusted project override replaces the global override field by field for the same model. Other global overrides still apply.
+A field with an invalid value does not apply.
 
 The extension checks the active model at session start and after every model change.
-The order is the session command, then the override for the active model, then `enabled`, then the default.
+For `enabled`, the order is the session command, then the override for the active model, then `enabled`, then the default.
+A model change also resets cut state, so the new budget applies from the next request.
 With paging off for a model, Pi uses its normal automatic compaction for that model.
 
 To keep the model out of the dumb zone, set `tokenBudget` below the context size where the model gets worse.
