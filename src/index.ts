@@ -16,6 +16,7 @@ import { registerContextPagingTools, type HistorySnapshot } from "./tools.ts";
 import { contextPagingStats, reportedInputTokens, type InputTokenCount } from "./stats.ts";
 
 import {
+	enabledForModel,
 	resolveContextPagingSettings,
 	type ContextPagingSettingsSources,
 	type ResolvedContextPagingSettings,
@@ -83,6 +84,10 @@ function branchEdits(branch: readonly SessionEntry[]): BranchEdits {
 	return edits;
 }
 
+function modelKeyOf(model: { provider: string; id: string } | undefined): string | undefined {
+	return model ? `${model.provider}/${model.id}` : undefined;
+}
+
 /** Registers context paging lifecycle hooks and the four recovery tools. */
 export default function contextPagingExtension(
 	pi: ExtensionAPI,
@@ -92,7 +97,8 @@ export default function contextPagingExtension(
 		? resolveContextPagingSettings(settingsSources)
 		: resolveContextPagingSettings({ globalSettings: { contextPaging: { enabled: false } }, projectTrusted: false });
 	let sessionEnabled: boolean | undefined;
-	const isEnabled = () => sessionEnabled ?? resolvedSettings.enabled;
+	let activeModelKey: string | undefined;
+	const isEnabled = () => sessionEnabled ?? enabledForModel(resolvedSettings, activeModelKey);
 	const publishStatus = (ctx: ExtensionContext) => {
 		if (ctx.hasUI) ctx.ui.setStatus("context-paging", isEnabled() ? "paging on" : "paging off");
 	};
@@ -188,7 +194,15 @@ export default function contextPagingExtension(
 				ctx.ui.notify("Usage: /context-paging [on|off|status|stats]", "warning");
 				return;
 			}
-			ctx.ui.notify(`Context paging is ${isEnabled() ? "enabled" : "disabled"} for this session.`, "info");
+			const modelOverride = sessionEnabled === undefined && activeModelKey !== undefined
+				&& resolvedSettings.modelEnabled.has(activeModelKey);
+			const state = isEnabled() ? "enabled" : "disabled";
+			ctx.ui.notify(
+				modelOverride
+					? `Context paging is ${state} for ${activeModelKey} by its model override.`
+					: `Context paging is ${state} for this session.`,
+				"info",
+			);
 		},
 	});
 
@@ -199,12 +213,13 @@ export default function contextPagingExtension(
 
 	pi.on("session_start", async (_event, ctx) => {
 		sessionEnabled = undefined;
+		activeModelKey = modelKeyOf(ctx.model);
 		resetPagingState();
 		invalidatingBranchEntries = new Set();
 		omittedFailureEntries = new Set();
 		try {
 			if (!settingsSources) {
-				resolvedSettings = { ...resolvedSettings, enabled: false };
+				resolvedSettings = { ...resolvedSettings, enabled: false, modelEnabled: new Map() };
 				resolvedSettings = resolveContextPagingSettings(await loadSettings(ctx));
 			}
 		} finally {
@@ -226,8 +241,10 @@ export default function contextPagingExtension(
 		omittedFailureEntries = new Set();
 		refreshSafely(ctx, true);
 	});
-	pi.on("model_select", () => {
+	pi.on("model_select", (event, ctx) => {
 		resetPagingState();
+		activeModelKey = modelKeyOf(event.model);
+		publishStatus(ctx);
 	});
 	pi.on("session_compact", (event) => {
 		const id = event.compactionEntry?.id;

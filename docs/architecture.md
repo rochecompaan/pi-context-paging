@@ -257,6 +257,7 @@ The `context` event prepares usage from the original request, applies the select
 The `turn_end` event records response usage.
 Successful `session_start` events cover new sessions, resumes, and forks. Successful `session_tree` events cover branch navigation.
 These events reset cut state and accounting. Every actual `model_select` resets both, in either window-size direction.
+`session_start` and `model_select` also record the active `provider/modelId`. The enabled check reads the session choice, then that model's `modelOverrides` entry, then `enabled`. `model_select` publishes the footer status again, because the override can change it.
 Successful `session_compact` events and newly projected compaction or `context_edit` entries also reset both.
 One `context_edit` is an exception: Pi's retry edit that omits a failed or aborted assistant response.
 That response was never sent, so the cut stays. The edit clears accounting only, because Pi's usage status then estimates the whole projection until the next measured response.

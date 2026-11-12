@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { defaultTrimToTokens, resolveContextPagingSettings } from "../src/settings.ts";
+import { defaultTrimToTokens, enabledForModel, resolveContextPagingSettings } from "../src/settings.ts";
 
 const invalidTargets: unknown[] = [
 	0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY,
@@ -98,4 +98,53 @@ test("computes the adaptive default exactly for accepted integer boundaries", ()
 	assert.equal(defaultTrimToTokens(1), 1);
 	assert.equal(defaultTrimToTokens(Number.MAX_SAFE_INTEGER - 1), 5_629_499_534_213_118);
 	assert.equal(defaultTrimToTokens(Number.MAX_SAFE_INTEGER - 4), 5_629_499_534_213_116);
+});
+
+test("merges trusted project model overrides over global ones by model key", () => {
+	const settings = resolveContextPagingSettings({
+		globalSettings: { contextPaging: { modelOverrides: { "a/one": { enabled: false }, "b/two": { enabled: false } } } },
+		projectSettings: { contextPaging: { modelOverrides: { "b/two": { enabled: true }, "c/three": { enabled: false } } } },
+		projectTrusted: true,
+	});
+	assert.equal(enabledForModel(settings, "a/one"), false);
+	assert.equal(enabledForModel(settings, "b/two"), true);
+	assert.equal(enabledForModel(settings, "c/three"), false);
+	assert.equal(enabledForModel(settings, "d/four"), true);
+	assert.equal(enabledForModel(settings, undefined), true);
+});
+
+test("ignores untrusted project model overrides", () => {
+	const settings = resolveContextPagingSettings({
+		globalSettings: { contextPaging: { modelOverrides: { "a/one": { enabled: false } } } },
+		projectSettings: { contextPaging: { modelOverrides: { "a/one": { enabled: true } } } },
+		projectTrusted: false,
+	});
+	assert.equal(enabledForModel(settings, "a/one"), false);
+});
+
+test("falls through invalid model overrides to the next source", () => {
+	for (const invalid of [true, "off", null, [], { enabled: "false" }, { enabled: 0 }, {}]) {
+		const settings = resolveContextPagingSettings({
+			globalSettings: { contextPaging: { enabled: false, modelOverrides: { "a/one": { enabled: true } } } },
+			projectSettings: { contextPaging: { modelOverrides: { "a/one": invalid } } },
+			projectTrusted: true,
+		});
+		assert.equal(enabledForModel(settings, "a/one"), true, `invalid override: ${JSON.stringify(invalid)}`);
+		assert.equal(enabledForModel(settings, "b/two"), false);
+	}
+	for (const invalid of [true, "x", null, []]) {
+		const settings = resolveContextPagingSettings({
+			globalSettings: { contextPaging: { modelOverrides: invalid } }, projectTrusted: false,
+		});
+		assert.equal(settings.modelEnabled.size, 0);
+	}
+});
+
+test("does not resolve model overrides from inherited object keys", () => {
+	const settings = resolveContextPagingSettings({
+		globalSettings: { contextPaging: { enabled: true, modelOverrides: JSON.parse('{"__proto__": {"enabled": false}}') } },
+		projectTrusted: false,
+	});
+	assert.equal(enabledForModel(settings, "constructor"), true);
+	assert.equal(enabledForModel(settings, "toString"), true);
 });

@@ -108,9 +108,35 @@ To change these values, add this object to `~/.pi/agent/settings.json` or to a t
 | `enabled` | Set this to `false` to stop paging and the recovery tools. | `true` |
 | `tokenBudget` | The largest request size, in estimated tokens. A larger request causes a cut. | `128000` |
 | `trimToTokens` | The request size that a cut trims to. | 5/8 of the budget |
+| `modelOverrides` | Per-model `enabled` values, keyed by exact `provider/modelId`. | None |
 
 A trusted project setting takes precedence over the global setting.
 The extension ignores project settings in untrusted projects.
+
+### Per-model overrides
+
+Paging helps only a model that calls the recovery tools.
+A model that ignores them loses the paged-out history and reads the same files again.
+Use `modelOverrides` to turn paging off for that model only:
+
+```json
+{
+  "contextPaging": {
+    "modelOverrides": {
+      "openrouter/deepseek/deepseek-v4.1-flash": { "enabled": false }
+    }
+  }
+}
+```
+
+The key is the exact `provider/modelId` of the model, as `/model` shows it.
+An override sets only `enabled`. The token budget and target stay shared.
+A trusted project override replaces the global override for the same model. Other global overrides still apply.
+An override that is not an object with a boolean `enabled` does not apply.
+
+The extension checks the active model at session start and after every model change.
+The order is the session command, then the override for the active model, then `enabled`, then the default.
+With paging off for a model, Pi uses its normal automatic compaction for that model.
 
 To keep the model out of the dumb zone, set `tokenBudget` below the context size where the model gets worse.
 If your model gets worse before 128,000 tokens, lower the budget.
@@ -147,6 +173,7 @@ A state change clears the remembered cut point and token accounting.
 Repeating `on` or `off` does not clear this state.
 
 Branch navigation, model changes, and manual compaction keep the session choice.
+The session choice also takes precedence over a model override.
 A new session, a resume, a fork, or an extension reload restores the saved settings.
 
 ### Session stats
@@ -192,7 +219,7 @@ In UI sessions, the extension publishes its effective state under the `context-p
 The text is exactly `paging on` or `paging off`, without ANSI styling.
 Custom footers can read this value from `footerData.getExtensionStatuses()`.
 
-The status reflects saved settings at session start and the current session choice after every `on` or `off` command.
+The status reflects saved settings at session start, the active model's override after every model change, and the current session choice after every `on` or `off` command.
 Repeated choices also publish the status.
 If settings fail to load, the status shows `paging off`.
 Session shutdown removes the status key. Headless sessions do not call the status UI.

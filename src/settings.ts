@@ -11,10 +11,26 @@ export type ResolvedContextPagingSettings = {
 	tokenBudget: number;
 	trimToTokens: number;
 	trimToTokensExplicit: boolean;
+	/** Per-model `enabled` overrides keyed by exact `provider/modelId`. */
+	modelEnabled: ReadonlyMap<string, boolean>;
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function readModelEnabledOverrides(settings: unknown, into: Map<string, boolean>): void {
+	if (!isRecord(settings) || !isRecord(settings.contextPaging)) return;
+	const overrides = settings.contextPaging.modelOverrides;
+	if (!isRecord(overrides)) return;
+	for (const [modelKey, override] of Object.entries(overrides)) {
+		if (isRecord(override) && typeof override.enabled === "boolean") into.set(modelKey, override.enabled);
+	}
+}
+
+/** Returns whether paging is enabled for a model, before any session command. */
+export function enabledForModel(settings: ResolvedContextPagingSettings, modelKey: string | undefined): boolean {
+	return (modelKey === undefined ? undefined : settings.modelEnabled.get(modelKey)) ?? settings.enabled;
 }
 
 function readEnabledSetting(settings: unknown): boolean | undefined {
@@ -47,6 +63,9 @@ export function resolveContextPagingSettings(
 		?? DEFAULT_CONTEXT_TOKEN_BUDGET;
 	const explicitTarget = readTokenSetting(projectSettings, "trimToTokens")
 		?? readTokenSetting(sources.globalSettings, "trimToTokens");
+	const modelEnabled = new Map<string, boolean>();
+	readModelEnabledOverrides(sources.globalSettings, modelEnabled);
+	readModelEnabledOverrides(projectSettings, modelEnabled);
 	return {
 		enabled: readEnabledSetting(projectSettings)
 			?? readEnabledSetting(sources.globalSettings)
@@ -54,5 +73,6 @@ export function resolveContextPagingSettings(
 		tokenBudget,
 		trimToTokens: explicitTarget ?? defaultTrimToTokens(tokenBudget),
 		trimToTokensExplicit: explicitTarget !== undefined,
+		modelEnabled,
 	};
 }
