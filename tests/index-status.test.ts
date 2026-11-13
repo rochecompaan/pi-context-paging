@@ -163,3 +163,45 @@ test("status queries and invalid arguments leave published status unchanged", as
 	assert.equal(harness.writes.length, before);
 	assert.equal(harness.statuses.get("context-paging"), "paging off");
 });
+
+const deepseek = { provider: "openrouter", id: "deepseek/deepseek-v4.1-flash" };
+const grok = { provider: "xai", id: "grok-4.7" };
+
+function modelOverrideHarness() {
+	const harness = statusHarness({
+		globalSettings: {
+			contextPaging: { enabled: true, modelOverrides: { "openrouter/deepseek/deepseek-v4.1-flash": { enabled: false } } },
+		},
+		projectTrusted: false,
+	});
+	const at = async (model: typeof deepseek | undefined, event: "session_start" | "model_select") => {
+		(harness.ctx as any).model = model;
+		await harness.emit(event, event === "model_select" ? { model } : {});
+		return {
+			status: harness.statuses.get("context-paging"),
+			compaction: await harness.emit("session_before_compact", { reason: "threshold" }),
+		};
+	};
+	return { ...harness, at };
+}
+
+test("applies a model override at session start and follows each model switch", async () => {
+	const harness = modelOverrideHarness();
+	assert.deepEqual(await harness.at(deepseek, "session_start"), { status: "paging off", compaction: undefined });
+	assert.deepEqual(await harness.at(grok, "model_select"), { status: "paging on", compaction: { cancel: true } });
+	assert.deepEqual(await harness.at(deepseek, "model_select"), { status: "paging off", compaction: undefined });
+});
+
+test("uses the global setting when the session has no model", async () => {
+	const harness = modelOverrideHarness();
+	assert.deepEqual(await harness.at(undefined, "session_start"), { status: "paging on", compaction: { cancel: true } });
+});
+
+test("lets a session command beat the model override until the next session start", async () => {
+	const harness = modelOverrideHarness();
+	await harness.at(deepseek, "session_start");
+	await harness.command("on");
+	assert.deepEqual(await harness.at(grok, "model_select"), { status: "paging on", compaction: { cancel: true } });
+	assert.deepEqual(await harness.at(deepseek, "model_select"), { status: "paging on", compaction: { cancel: true } });
+	assert.deepEqual(await harness.at(deepseek, "session_start"), { status: "paging off", compaction: undefined });
+});

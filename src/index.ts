@@ -17,6 +17,7 @@ import { contextPagingStats, reportedInputTokens, type InputTokenCount } from ".
 
 import {
 	resolveContextPagingSettings,
+	settingsForModel,
 	type ContextPagingSettingsSources,
 	type ResolvedContextPagingSettings,
 } from "./settings.ts";
@@ -83,6 +84,10 @@ function branchEdits(branch: readonly SessionEntry[]): BranchEdits {
 	return edits;
 }
 
+function modelKeyOf(model: { provider: string; id: string } | undefined): string | undefined {
+	return model ? `${model.provider}/${model.id}` : undefined;
+}
+
 /** Registers context paging lifecycle hooks and the four recovery tools. */
 export default function contextPagingExtension(
 	pi: ExtensionAPI,
@@ -92,7 +97,10 @@ export default function contextPagingExtension(
 		? resolveContextPagingSettings(settingsSources)
 		: resolveContextPagingSettings({ globalSettings: { contextPaging: { enabled: false } }, projectTrusted: false });
 	let sessionEnabled: boolean | undefined;
-	const isEnabled = () => sessionEnabled ?? resolvedSettings.enabled;
+	let activeModelKey: string | undefined;
+	const modelSettings = (ctx?: ExtensionContext) =>
+		settingsForModel(resolvedSettings, activeModelKey, ctx?.model?.contextWindow);
+	const isEnabled = () => sessionEnabled ?? modelSettings().enabled;
 	const publishStatus = (ctx: ExtensionContext) => {
 		if (ctx.hasUI) ctx.ui.setStatus("context-paging", isEnabled() ? "paging on" : "paging off");
 	};
@@ -108,7 +116,7 @@ export default function contextPagingExtension(
 		latestInput = undefined;
 	};
 	const warnAboutTrimTarget = (ctx: ExtensionContext) => {
-		const { tokenBudget, trimToTokens, trimToTokensExplicit } = resolvedSettings;
+		const { tokenBudget, trimToTokens, trimToTokensExplicit } = modelSettings(ctx);
 		if (!isEnabled() || !trimToTokensExplicit || trimToTokens < tokenBudget) return;
 		const pair = `${tokenBudget}:${trimToTokens}`;
 		if (warnedSettingPairs.has(pair)) return;
@@ -173,7 +181,7 @@ export default function contextPagingExtension(
 			const action = args.trim();
 			if (action === "stats") {
 				try {
-					ctx.ui.notify(await contextPagingStats(ctx, isEnabled(), resolvedSettings.tokenBudget, latestInput), "info");
+					ctx.ui.notify(await contextPagingStats(ctx, isEnabled(), modelSettings(ctx).tokenBudget, latestInput), "info");
 				} catch (error) {
 					ctx.ui.notify(`Context paging stats are unavailable: ${errorMessage(error)}`, "warning");
 				}
@@ -188,7 +196,14 @@ export default function contextPagingExtension(
 				ctx.ui.notify("Usage: /context-paging [on|off|status|stats]", "warning");
 				return;
 			}
-			ctx.ui.notify(`Context paging is ${isEnabled() ? "enabled" : "disabled"} for this session.`, "info");
+			const modelOverride = sessionEnabled === undefined && modelSettings().enabledByModelOverride;
+			const state = isEnabled() ? "enabled" : "disabled";
+			ctx.ui.notify(
+				modelOverride
+					? `Context paging is ${state} for ${activeModelKey} by its model override.`
+					: `Context paging is ${state} for this session.`,
+				"info",
+			);
 		},
 	});
 
@@ -199,12 +214,13 @@ export default function contextPagingExtension(
 
 	pi.on("session_start", async (_event, ctx) => {
 		sessionEnabled = undefined;
+		activeModelKey = modelKeyOf(ctx.model);
 		resetPagingState();
 		invalidatingBranchEntries = new Set();
 		omittedFailureEntries = new Set();
 		try {
 			if (!settingsSources) {
-				resolvedSettings = { ...resolvedSettings, enabled: false };
+				resolvedSettings = { ...resolvedSettings, enabled: false, modelOverrides: new Map() };
 				resolvedSettings = resolveContextPagingSettings(await loadSettings(ctx));
 			}
 		} finally {
@@ -226,8 +242,10 @@ export default function contextPagingExtension(
 		omittedFailureEntries = new Set();
 		refreshSafely(ctx, true);
 	});
-	pi.on("model_select", () => {
+	pi.on("model_select", (event, ctx) => {
 		resetPagingState();
+		activeModelKey = modelKeyOf(event.model);
+		publishStatus(ctx);
 	});
 	pi.on("session_compact", (event) => {
 		const id = event.compactionEntry?.id;
@@ -258,13 +276,14 @@ export default function contextPagingExtension(
 			const contextTokens = usageTracker.prepare(
 				event.messages, residentTokens, ctx.getContextUsage()?.tokens, canonicalSessionMessages ?? [],
 			);
+			const { tokenBudget, trimToTokens } = modelSettings(ctx);
 			const selection = selectContext({
 				messages: event.messages,
 				systemPrompt,
 				activeTools,
 				modelContextWindow: ctx.model?.contextWindow,
-				tokenBudget: resolvedSettings.tokenBudget,
-				trimToTokens: resolvedSettings.trimToTokens,
+				tokenBudget,
+				trimToTokens,
 				cutState: cutState.prepare(rawHistoryItems),
 				contextTokens,
 				tokenEstimates: usageTracker.tokenEstimates,
