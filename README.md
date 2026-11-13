@@ -330,7 +330,13 @@ When a session loads or changes branches, paging also treats saved tool calls wi
 It excludes those incomplete exchanges from model requests but keeps their recorded messages and actual results available through recovery tools.
 It does not change session files or add missing results.
 New tool calls in a live session still require results.
-Duplicate, mismatched, and orphan results still raise errors.
+
+A compaction can run while a tool call is still running, for example when an extension tool compacts the session.
+Pi then summarizes the call but keeps its result, so the result has no call before it.
+Paging leaves such results out of model requests when they directly follow a compaction or branch summary.
+The recovery tools still return them with their calls.
+
+Duplicate, mismatched, and other orphan results still raise errors.
 
 **The cut point.** A request within the budget needs no cut and no notice.
 When a request exceeds the budget, the extension removes the oldest history until the request is at or below the target.

@@ -155,6 +155,23 @@ function exchangeAt(
 	return { exchange: { assistant, results, messages: [assistant, ...results] }, nextIndex };
 }
 
+function isSummaryMessage(message: AgentMessage | undefined): boolean {
+	return message?.role === "compactionSummary" || message?.role === "branchSummary";
+}
+
+// A compaction started during a tool call summarizes the call but keeps its later result.
+function summaryBoundaryResultsEnd(messages: readonly AgentMessage[], index: number): number {
+	const seenIds = new Set<string>();
+	let nextIndex = index;
+	while (messages[nextIndex]?.role === "toolResult") {
+		const { toolCallId } = messages[nextIndex] as ToolResultMessage;
+		if (seenIds.has(toolCallId)) throw structureError("Canonical summary boundary has a duplicate tool result.");
+		seenIds.add(toolCallId);
+		nextIndex++;
+	}
+	return nextIndex;
+}
+
 function normalizeInterruptedExchanges(
 	messages: readonly AgentMessage[],
 	outgoingOnly: readonly boolean[],
@@ -173,11 +190,16 @@ function normalizeInterruptedExchanges(
 	}
 	const normalized: AgentMessage[] = [];
 	const normalizedOutgoingOnly: boolean[] = [];
-	let removedInterruptedExchange = false;
+	let removedMessages = false;
 	for (let index = 0; index < messages.length;) {
 		const message = messages[index]!;
 		if (message.role === "toolResult") {
-			throw structureError("Canonical context contains an orphan tool result.");
+			if (!isSummaryMessage(messages[index - 1])) {
+				throw structureError("Canonical context contains an orphan tool result.");
+			}
+			removedMessages = true;
+			index = summaryBoundaryResultsEnd(messages, index);
+			continue;
 		}
 		if (message.role !== "assistant") {
 			normalized.push(message);
@@ -190,14 +212,14 @@ function normalizeInterruptedExchanges(
 		const interrupted = isInterruptedAssistantMessage(message)
 			|| historyId !== undefined && restoredOccurrences.get(historyId) === 1;
 		const { exchange, nextIndex } = exchangeAt(messages, index, interrupted);
-		if (interrupted) removedInterruptedExchange = true;
+		if (interrupted) removedMessages = true;
 		else {
 			normalized.push(...exchange.messages);
 			normalizedOutgoingOnly.push(...outgoingOnly.slice(index, nextIndex));
 		}
 		index = nextIndex;
 	}
-	return removedInterruptedExchange
+	return removedMessages
 		? { messages: normalized, outgoingOnly: normalizedOutgoingOnly }
 		: { messages: messages as AgentMessage[], outgoingOnly };
 }

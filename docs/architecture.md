@@ -110,6 +110,7 @@ Warning state survives model switches but not Pi restart. An implicit target equ
 `context-policy.ts` counts the system prompt and active tool definitions once as resident input.
 Ordinary message estimates do not count outgoing system metadata a second time.
 Before it applies any cut, the selector validates the original exchanges and omits interrupted assistants and their contiguous owned results.
+It also omits tool results that directly follow a compaction or branch summary. A compaction that runs during a tool call summarizes the call but keeps its later result. Raw history still pairs that result with its call.
 Invalid exchanges outside the retained region still fail. Normalization keeps outgoing-only provenance aligned with retained messages.
 The selector groups the remaining conversations into prefix units, completed turns, and active-turn exchanges.
 The persistent active request, injected instructions, and latest valid unread tool-result exchange remain protected.

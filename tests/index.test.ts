@@ -347,6 +347,30 @@ test("selects canonical context and isolates raw-history failures", async () => 
 	assert.match(harness.notifications.at(-1)?.message ?? "", /aborted this provider call/i);
 });
 
+test("sends a session compacted during a tool call and keeps the boundary result recoverable", async () => {
+	const harness = createHarness();
+	const summary = { role: "compactionSummary", summary: "HANDOFF_SUMMARY", tokensBefore: 1_000, timestamp: 0 };
+	const boundaryResult = result("handoff-call", "HANDOFF_RESULT");
+	const next = user("next request");
+	harness.setBranch([
+		entry("user-1", user("start handoff")),
+		entry("assistant-1", toolAssistant("handoff-call", "handoff")),
+		{ id: "compaction-1", type: "compaction", summary: "HANDOFF_SUMMARY", firstKeptEntryId: "compaction-1", tokensBefore: 1_000, timestamp: "2026-09-21T00:00:00.000Z" },
+		entry("result-1", boundaryResult),
+		entry("user-2", next),
+	]);
+	await emit(harness, "session_start", { reason: "reload" });
+
+	const selection = await emit(harness, "context", { messages: [summary, boundaryResult, next] }) as any;
+	assert.equal(harness.abortCalls(), 0);
+	assert.deepEqual(selection.messages, [summary, next]);
+
+	assert.deepEqual(await searchIds(harness, "HANDOFF_RESULT"), ["assistant-1"]);
+	const load = harness.tools.find((tool) => tool.name === "load_history");
+	const loaded = await load.execute("call", { historyIds: ["assistant-1"] }, undefined, undefined, harness.ctx);
+	assert.match(loaded.content.map((block: any) => block.text).join(""), /HANDOFF_RESULT/);
+});
+
 test("uses a tracked measured anchor when raw history returns after paging", async (t) => {
 	const prepares = t.mock.method(ContextUsageTracker.prototype, "prepare");
 	const harness = createHarness({

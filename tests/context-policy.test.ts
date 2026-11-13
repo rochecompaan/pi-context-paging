@@ -562,6 +562,48 @@ test("keeps canonical compaction summaries until FIFO removal needs them", () =>
 	);
 });
 
+test("omits tool results whose call a summary boundary replaced", () => {
+	const summaries = [
+		{ role: "compactionSummary", summary: "CANONICAL_SUMMARY", tokensBefore: 1_000, timestamp: 0 },
+		{ role: "branchSummary", summary: "BRANCH_SUMMARY", fromId: "branch-leaf", timestamp: 0 },
+	];
+	for (const summary of summaries) {
+		const system = { role: "system", content: "compaction system message", toolsAdded: [] };
+		const results = [result("summarized-a", repeat("BOUNDARY_RESULT_A", 1_000)), result("summarized-b", "BOUNDARY_RESULT_B")];
+		const request = user("next request");
+		const messages = [system, summary, ...results, request];
+		const before = structuredClone(messages);
+		const removedTokens = results.reduce((total, message) => total + estimateTokens(message as any), 0);
+		const contextTokens = 2_000;
+
+		const selection = selected(messages, { contextTokens, tokenBudget: contextTokens - removedTokens });
+		assert.equal(selection.mode, "within-budget");
+		assert.deepEqual(selection.messages, [system, summary, request]);
+		assert.equal(selection.estimatedTokens, contextTokens - removedTokens);
+		assert.deepEqual(messages, before);
+
+		const paged = selected([system, summary, ...results, user(repeat("old request", 300_000)), assistant("old answer"), request]);
+		assert.equal(paged.mode, "paged");
+		assert.equal(paged.messages.some((message: any) => message.role === "toolResult"), false);
+		assert.equal(paged.messages.includes(request), true);
+	}
+});
+
+test("rejects orphan results away from a summary boundary and duplicate boundary results", () => {
+	const summary = { role: "compactionSummary", summary: "CANONICAL_SUMMARY", tokensBefore: 1_000, timestamp: 0 };
+	for (const messages of [
+		[result("orphan", "bad"), user("next request")],
+		[summary, user("next request"), result("orphan", "bad")],
+		[summary, assistant("answer"), result("orphan", "bad")],
+		[summary, result("duplicate", "first"), result("duplicate", "second"), user("next request")],
+	]) {
+		assert.throws(
+			() => selected(messages),
+			(error: unknown) => error instanceof ContextSelectionError && error.code === "INVALID_MESSAGE_STRUCTURE",
+		);
+	}
+});
+
 test("keeps a protected unread trailing parallel tool exchange for one follow-up call", () => {
 	const protectedAssistant = toolAssistant(toolCall("new-call-a"), toolCall("new-call-b"));
 	const protectedResults = [
