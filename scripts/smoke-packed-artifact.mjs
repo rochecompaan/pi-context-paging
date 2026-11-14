@@ -25,6 +25,7 @@ const expectedFiles = [
   "src/recovery-loads.ts",
   "src/recovery-parts.ts",
   "src/recovery-response.ts",
+  "src/routed-model.ts",
   "src/selection-history.ts",
   "src/settings.ts",
   "src/stats.ts",

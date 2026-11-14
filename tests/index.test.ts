@@ -79,8 +79,17 @@ function createHarness(settings: Settings | null = { globalSettings: {}, project
 	let appends = 0;
 	let contextUsage: unknown;
 	let activeTools = ["small", "missing"];
+	const listeners = new Map<string, Array<(data: unknown) => void>>();
+	const models: Array<{ provider: string; id: string; contextWindow: number }> = [];
 	const pi = {
 		on(name: string, handler: Handler) { handlers.set(name, handler); },
+		events: {
+			on(channel: string, listener: (data: unknown) => void) {
+				listeners.set(channel, [...listeners.get(channel) ?? [], listener]);
+				return () => {};
+			},
+			emit(channel: string, data: unknown) { for (const listener of listeners.get(channel) ?? []) listener(data); },
+		},
 		registerCommand(name: string, command: Omit<RegisteredCommand, "name" | "sourceInfo">) { commands.set(name, command); },
 		registerTool(tool: any) { tools.push(tool); },
 		appendEntry() { appends++; },
@@ -106,7 +115,8 @@ function createHarness(settings: Settings | null = { globalSettings: {}, project
 		getSystemPrompt: () => "system",
 		getContextUsage: () => contextUsage,
 		isProjectTrusted: () => false,
-		model: { contextWindow: 64_000 },
+		model: { contextWindow: 64_000 } as { contextWindow: number; api?: string; provider?: string; id?: string },
+		modelRegistry: { find: (provider: string, id: string) => models.find((model) => model.provider === provider && model.id === id) },
 		ui: { notify: (message: string, level: string) => notifications.push({ message, level }) },
 		abort: () => { aborts++; },
 	};
@@ -127,6 +137,8 @@ function createHarness(settings: Settings | null = { globalSettings: {}, project
 		appendCalls: () => appends,
 		setContextUsage: (next: unknown) => { contextUsage = next; },
 		setActiveTools: (next: string[]) => { activeTools = next; },
+		addModel: (model: { provider: string; id: string; contextWindow: number }) => { models.push(model); },
+		emitEvent: (channel: string, data: unknown) => pi.events.emit(channel, data),
 	};
 }
 
@@ -242,7 +254,9 @@ test("registers only paging lifecycle handlers", () => {
 	const harness = createHarness();
 	assert.equal(harness.tools.length, 4);
 	assert.deepEqual([...harness.handlers.keys()].sort(), [
+		"agent_end",
 		"context",
+		"message_end",
 		"model_select",
 		"session_before_compact",
 		"session_compact",
@@ -250,6 +264,7 @@ test("registers only paging lifecycle handlers", () => {
 		"session_start",
 		"session_tree",
 		"turn_end",
+		"turn_start",
 	]);
 	assert.equal(harness.handlers.has("session_before_tree"), false);
 });
@@ -1096,6 +1111,133 @@ test("model switches reset the frontier in both window-size directions", async (
 	assert.equal(hasMarker(smallAgain.messages, "WINDOW_C"), false);
 	assert.equal(hasMarker(smallAgain.messages, "WINDOW_ACTIVE"), true);
 	assert.equal(harness.abortCalls(), 0);
+});
+
+test("a virtual model without a declared window pages to the configured budget", async () => {
+	const harness = createHarness({ globalSettings: { contextPaging: { tokenBudget: 64_000 } }, projectTrusted: false });
+	const messages = ["VIRTUAL_A", "VIRTUAL_B", "VIRTUAL_C"].flatMap((id) => [user(id), assistant(`${id} ${"x".repeat(240_000)}`)]);
+	messages.push(user("VIRTUAL_ACTIVE"));
+	harness.setBranch(messages.map((message, index) => entry(`virtual-${index}`, message)));
+	Object.assign(harness.ctx.model, { api: "pi-virtual", contextWindow: 0 });
+	const selected = await emit(harness, "context", { messages }) as any;
+	assert.equal(harness.abortCalls(), 0);
+	assert.deepEqual(harness.notifications.filter((item) => item.level === "error"), []);
+	assert.equal(hasMarker(selected.messages, "VIRTUAL_C"), false);
+	assert.equal(hasMarker(selected.messages, "VIRTUAL_ACTIVE"), true);
+});
+
+test("a physical model with a zero window still aborts the provider call", async () => {
+	const harness = createHarness({ globalSettings: { contextPaging: { tokenBudget: 128_000 } }, projectTrusted: false });
+	const messages = [user("PHYSICAL_ACTIVE")];
+	harness.setBranch(messages.map((message, index) => entry(`physical-${index}`, message)));
+	harness.ctx.model.contextWindow = 0;
+	await emit(harness, "context", { messages });
+	assert.equal(harness.abortCalls(), 1);
+	assert.ok(harness.notifications.some((item) => item.level === "error" && /context-window estimate is invalid/.test(item.message)));
+});
+
+function routedFixture() {
+	const harness = createHarness({ globalSettings: { contextPaging: { tokenBudget: 128_000 } }, projectTrusted: false });
+	Object.assign(harness.ctx.model, { api: "pi-virtual", provider: "router", id: "auto", contextWindow: 128_000 });
+	harness.addModel({ provider: "lab", id: "large", contextWindow: 128_000 });
+	harness.addModel({ provider: "lab", id: "small", contextWindow: 64_000 });
+	const messages = ["ROUTE_A", "ROUTE_B", "ROUTE_C"].flatMap((id) => [user(id), assistant(`${id} ${"x".repeat(240_000)}`)]);
+	messages.push(user("ROUTE_ACTIVE"));
+	harness.setBranch(messages.map((message, index) => entry(`route-${index}`, message)));
+	// Pi emits turn_start before every request, then calls route() in prepareRequest.
+	const start = async () => { await emit(harness, "turn_start", { type: "turn_start" }); };
+	const report = (route: unknown) => { harness.emitEvent("context-paging:route", route); };
+	const page = async () => await emit(harness, "context", { messages: structuredClone(messages) }) as any;
+	const request = async (route?: unknown) => {
+		await start();
+		if (route !== undefined) report(route);
+		return await page();
+	};
+	return { harness, request, start, report, page };
+}
+
+test("a reported route sets the window for that request, in both size directions", async () => {
+	const { harness, request } = routedFixture();
+	const large = await request({ version: 1, provider: "lab", id: "large" });
+	assert.equal(hasMarker(large.messages, "ROUTE_C"), true);
+	const small = await request({ version: 1, provider: "lab", id: "small" });
+	assert.equal(hasMarker(small.messages, "ROUTE_C"), false);
+	assert.equal(hasMarker(small.messages, "ROUTE_ACTIVE"), true);
+	const largeAgain = await request({ version: 1, provider: "lab", id: "large" });
+	assert.equal(hasMarker(largeAgain.messages, "ROUTE_C"), true);
+	assert.equal(harness.abortCalls(), 0);
+});
+
+test("a route report applies to one request only", async () => {
+	const { harness, request } = routedFixture();
+	harness.ctx.model.contextWindow = 0;
+	const small = await request({ version: 1, provider: "lab", id: "small" });
+	assert.equal(hasMarker(small.messages, "ROUTE_C"), false);
+	const unreported = await request();
+	assert.equal(hasMarker(unreported.messages, "ROUTE_C"), true);
+	assert.equal(harness.abortCalls(), 0);
+});
+
+test("route reports are ignored for physical models and unknown payloads", async () => {
+	const { harness, request } = routedFixture();
+	for (const route of [{ version: 2, provider: "lab", id: "small" }, { version: 1, provider: "lab" }, "lab/small"]) {
+		const selected = await request(route);
+		assert.equal(hasMarker(selected.messages, "ROUTE_C"), true);
+	}
+	Object.assign(harness.ctx.model, { api: "lab-api", provider: "lab", id: "large" });
+	const physical = await request({ version: 1, provider: "lab", id: "small" });
+	assert.equal(hasMarker(physical.messages, "ROUTE_C"), true);
+	assert.equal(harness.abortCalls(), 0);
+});
+
+test("a report from a request that ended before paging does not reach the next request", async () => {
+	const { harness, start, report, page } = routedFixture();
+	await start();
+	report({ version: 1, provider: "lab", id: "small" });
+	// Routing failed after the report: Pi ends the run with an error response, never calling context.
+	const failure = { ...assistant(""), stopReason: "error", errorMessage: "routing failed" };
+	await emit(harness, "message_end", { type: "message_end", message: failure });
+	await emit(harness, "agent_end", { type: "agent_end", messages: [failure] });
+	Object.assign(harness.ctx.model, { provider: "router", id: "other", contextWindow: 0 });
+	await start();
+	const unreported = await page();
+	assert.equal(hasMarker(unreported.messages, "ROUTE_C"), true);
+	assert.equal(harness.abortCalls(), 0);
+});
+
+test("a report only applies under the virtual selection it was made for", async () => {
+	const { harness, start, report, page } = routedFixture();
+	await start();
+	report({ version: 1, provider: "lab", id: "small" });
+	Object.assign(harness.ctx.model, { provider: "router", id: "other", contextWindow: 0 });
+	const other = await page();
+	assert.equal(hasMarker(other.messages, "ROUTE_C"), true);
+	assert.equal(harness.abortCalls(), 0);
+});
+
+test("a report made outside a request is ignored", async () => {
+	const { harness, start, report, page } = routedFixture();
+	report({ version: 1, provider: "lab", id: "small" });
+	await start();
+	const early = await page();
+	assert.equal(hasMarker(early.messages, "ROUTE_C"), true);
+	await start();
+	await emit(harness, "model_select", { type: "model_select", model: harness.ctx.model });
+	report({ version: 1, provider: "lab", id: "small" });
+	const afterSwitch = await page();
+	assert.equal(hasMarker(afterSwitch.messages, "ROUTE_C"), true);
+	assert.equal(harness.abortCalls(), 0);
+});
+
+test("a reported route that cannot be resolved aborts the provider call", async () => {
+	const { harness, request } = routedFixture();
+	harness.addModel({ provider: "lab", id: "broken", contextWindow: 0 });
+	await request({ version: 1, provider: "lab", id: "missing" });
+	assert.equal(harness.abortCalls(), 1);
+	assert.ok(harness.notifications.some((item) => item.level === "error" && /lab\/missing/.test(item.message)));
+	await request({ version: 1, provider: "lab", id: "broken" });
+	assert.equal(harness.abortCalls(), 2);
+	assert.ok(harness.notifications.some((item) => item.level === "error" && /context-window estimate is invalid/.test(item.message)));
 });
 
 test("a fresh extension has no prior frontier", async (t) => {

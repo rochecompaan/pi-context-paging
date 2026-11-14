@@ -244,7 +244,7 @@ test("live navigation notices ordinary work added in a mixed paging turn", async
 	let branch = [entry("active-user", user())];
 	const tools: ToolDefinition<any, any, any>[] = [];
 	const pi = {
-		on() {}, registerCommand() {}, registerTool(tool: ToolDefinition<any, any, any>) { tools.push(tool); },
+		on() {}, events: { on: () => () => {} }, registerCommand() {}, registerTool(tool: ToolDefinition<any, any, any>) { tools.push(tool); },
 	};
 	contextPagingExtension(pi as unknown as ExtensionAPI, { globalSettings: {}, projectTrusted: false });
 	const ctx = { sessionManager: { getBranch: () => branch, buildSessionProjection: () => ({

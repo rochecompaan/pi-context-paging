@@ -32,6 +32,7 @@ function statusHarness(settings?: ContextPagingSettingsSources) {
 	};
 	contextPagingExtension({
 		on(name: string, handler: Handler) { handlers.set(name, handler); },
+		events: { on: () => () => {} },
 		registerCommand(name: string, command: Omit<RegisteredCommand, "name" | "sourceInfo">) {
 			commands.set(name, command);
 		},

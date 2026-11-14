@@ -131,6 +131,31 @@ The extension keeps stable cuts, but it trims to the effective budget instead.
 It warns once for each budget and target pair in one Pi process.
 A restart can repeat the warning.
 
+### Virtual models
+
+A [virtual model](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/virtual-models.md) routes each request to a physical model.
+Pi does not tell extensions which physical model the current request uses.
+A router can tell the extension from `route()`, which Pi calls before paging runs:
+
+```ts
+route(request, ctx) {
+  const model = ctx.modelRegistry.find("anthropic", "claude-haiku-4-5")!;
+  pi.events.emit("context-paging:route", { version: 1, provider: model.provider, id: model.id });
+  return { model, thinkingLevel: "medium" };
+}
+```
+
+The extension uses the reported model's context window for that one request.
+Send the report from `route()` only. The extension ignores a report sent at any other time, and drops it if the request fails before paging runs.
+A switch to another routed model resets the cut, as a model switch does.
+If the reported model is not a physical model in the registry, or its window is invalid, the extension aborts the request.
+The extension ignores payloads with another `version`.
+
+Without a report, the extension uses the window that the virtual model declares.
+If the virtual model declares no window, the window is unknown, and the effective budget is `tokenBudget`.
+In both cases, set `tokenBudget` no higher than the smallest context window the router can choose.
+The extension cancels Pi's automatic compaction, so nothing else stops a request that is too large for the routed model.
+
 ## Session command
 
 Use `/context-paging` to change paging for the current session only:
