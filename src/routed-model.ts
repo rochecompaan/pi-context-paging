@@ -25,39 +25,58 @@ function parseRouteReport(data: unknown): RouteReport | undefined {
 	return { provider, id };
 }
 
-/** Holds the latest route report until the next `context` hook takes it. */
+/** Identifies a model, for matching a selection or a change of limits. */
+export function modelKey(model: ExtensionContext["model"]): string {
+	return `${model?.provider}/${model?.id}`;
+}
+
+/**
+ * Binds route reports to one request. Pi emits `turn_start` before every request, then
+ * calls `route()`, then the `context` hook. A request that ends before the hook ends with
+ * an assistant `message_end`, so a report never outlives the request that made it.
+ */
 export class RouteReports {
-	#pending: RouteReport | undefined;
+	#request: { selection: string; report?: RouteReport } | undefined;
 
 	constructor(pi: ExtensionAPI) {
-		// The newest report wins; one this version cannot read clears an older one.
-		pi.events.on(ROUTE_CHANNEL, (data) => { this.#pending = parseRouteReport(data); });
+		pi.events.on(ROUTE_CHANNEL, (data) => {
+			// The newest report wins; one this version cannot read clears an older one.
+			if (this.#request) this.#request.report = parseRouteReport(data);
+		});
 	}
 
-	/** Returns the report for the current request and forgets it. */
-	take(): RouteReport | undefined {
-		const report = this.#pending;
-		this.#pending = undefined;
-		return report;
+	/** Starts accepting a report for a request through `selection`. */
+	open(selection: string): void {
+		this.#request = { selection };
+	}
+
+	/** Stops accepting reports until the next request starts. */
+	close(): void {
+		this.#request = undefined;
+	}
+
+	/** Returns the report for this request if it was made under `selection`, and closes the request. */
+	take(selection: string): RouteReport | undefined {
+		const request = this.#request;
+		this.#request = undefined;
+		return request?.selection === selection ? request.report : undefined;
 	}
 }
 
 /** Resolves the limits of the model the current request uses. */
 export function requestLimits(ctx: ExtensionContext, report: RouteReport | undefined): RequestLimits {
 	const model = ctx.model;
-	if (model?.api !== "pi-virtual") {
-		return { contextWindow: model?.contextWindow, key: `${model?.provider}/${model?.id}` };
-	}
+	if (model?.api !== "pi-virtual") return { contextWindow: model?.contextWindow, key: modelKey(model) };
 	if (report) {
 		const routed = ctx.modelRegistry.find(report.provider, report.id);
 		if (!routed || routed.api === "pi-virtual") {
 			throw new Error(`The router reported ${report.provider}/${report.id}, which is not a physical model in the registry.`);
 		}
 		// Invalid physical windows reach context selection and fail closed there.
-		return { contextWindow: routed.contextWindow, key: `${routed.provider}/${routed.id}` };
+		return { contextWindow: routed.contextWindow, key: modelKey(routed) };
 	}
 	// Pi reports an unset virtual-model window as 0. That window is unknown, so the
 	// configured budget applies.
 	const unknown = model.contextWindow === 0 || model.contextWindow === undefined;
-	return { contextWindow: unknown ? undefined : model.contextWindow, key: `${model.provider}/${model.id}` };
+	return { contextWindow: unknown ? undefined : model.contextWindow, key: modelKey(model) };
 }

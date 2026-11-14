@@ -254,7 +254,9 @@ test("registers only paging lifecycle handlers", () => {
 	const harness = createHarness();
 	assert.equal(harness.tools.length, 4);
 	assert.deepEqual([...harness.handlers.keys()].sort(), [
+		"agent_end",
 		"context",
+		"message_end",
 		"model_select",
 		"session_before_compact",
 		"session_compact",
@@ -262,6 +264,7 @@ test("registers only paging lifecycle handlers", () => {
 		"session_start",
 		"session_tree",
 		"turn_end",
+		"turn_start",
 	]);
 	assert.equal(harness.handlers.has("session_before_tree"), false);
 });
@@ -1141,11 +1144,16 @@ function routedFixture() {
 	const messages = ["ROUTE_A", "ROUTE_B", "ROUTE_C"].flatMap((id) => [user(id), assistant(`${id} ${"x".repeat(240_000)}`)]);
 	messages.push(user("ROUTE_ACTIVE"));
 	harness.setBranch(messages.map((message, index) => entry(`route-${index}`, message)));
+	// Pi emits turn_start before every request, then calls route() in prepareRequest.
+	const start = async () => { await emit(harness, "turn_start", { type: "turn_start" }); };
+	const report = (route: unknown) => { harness.emitEvent("context-paging:route", route); };
+	const page = async () => await emit(harness, "context", { messages: structuredClone(messages) }) as any;
 	const request = async (route?: unknown) => {
-		if (route !== undefined) harness.emitEvent("context-paging:route", route);
-		return await emit(harness, "context", { messages: structuredClone(messages) }) as any;
+		await start();
+		if (route !== undefined) report(route);
+		return await page();
 	};
-	return { harness, request };
+	return { harness, request, start, report, page };
 }
 
 test("a reported route sets the window for that request, in both size directions", async () => {
@@ -1179,6 +1187,45 @@ test("route reports are ignored for physical models and unknown payloads", async
 	Object.assign(harness.ctx.model, { api: "lab-api", provider: "lab", id: "large" });
 	const physical = await request({ version: 1, provider: "lab", id: "small" });
 	assert.equal(hasMarker(physical.messages, "ROUTE_C"), true);
+	assert.equal(harness.abortCalls(), 0);
+});
+
+test("a report from a request that ended before paging does not reach the next request", async () => {
+	const { harness, start, report, page } = routedFixture();
+	await start();
+	report({ version: 1, provider: "lab", id: "small" });
+	// Routing failed after the report: Pi ends the run with an error response, never calling context.
+	const failure = { ...assistant(""), stopReason: "error", errorMessage: "routing failed" };
+	await emit(harness, "message_end", { type: "message_end", message: failure });
+	await emit(harness, "agent_end", { type: "agent_end", messages: [failure] });
+	Object.assign(harness.ctx.model, { provider: "router", id: "other", contextWindow: 0 });
+	await start();
+	const unreported = await page();
+	assert.equal(hasMarker(unreported.messages, "ROUTE_C"), true);
+	assert.equal(harness.abortCalls(), 0);
+});
+
+test("a report only applies under the virtual selection it was made for", async () => {
+	const { harness, start, report, page } = routedFixture();
+	await start();
+	report({ version: 1, provider: "lab", id: "small" });
+	Object.assign(harness.ctx.model, { provider: "router", id: "other", contextWindow: 0 });
+	const other = await page();
+	assert.equal(hasMarker(other.messages, "ROUTE_C"), true);
+	assert.equal(harness.abortCalls(), 0);
+});
+
+test("a report made outside a request is ignored", async () => {
+	const { harness, start, report, page } = routedFixture();
+	report({ version: 1, provider: "lab", id: "small" });
+	await start();
+	const early = await page();
+	assert.equal(hasMarker(early.messages, "ROUTE_C"), true);
+	await start();
+	await emit(harness, "model_select", { type: "model_select", model: harness.ctx.model });
+	report({ version: 1, provider: "lab", id: "small" });
+	const afterSwitch = await page();
+	assert.equal(hasMarker(afterSwitch.messages, "ROUTE_C"), true);
 	assert.equal(harness.abortCalls(), 0);
 });
 

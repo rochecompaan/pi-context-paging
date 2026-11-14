@@ -14,7 +14,7 @@ import { isRecoverableHistoryItem } from "./recovery-content.ts";
 import { HistoryNavigator } from "./navigator.ts";
 import { registerContextPagingTools, type HistorySnapshot } from "./tools.ts";
 import { contextPagingStats, reportedInputTokens, type InputTokenCount } from "./stats.ts";
-import { requestLimits, RouteReports, type RequestLimits } from "./routed-model.ts";
+import { modelKey, requestLimits, RouteReports, type RequestLimits } from "./routed-model.ts";
 
 import {
 	resolveContextPagingSettings,
@@ -202,6 +202,7 @@ export default function contextPagingExtension(
 
 	pi.on("session_start", async (_event, ctx) => {
 		sessionEnabled = undefined;
+		routeReports.close();
 		resetPagingState();
 		invalidatingBranchEntries = new Set();
 		omittedFailureEntries = new Set();
@@ -216,7 +217,18 @@ export default function contextPagingExtension(
 		refreshSafely(ctx, true);
 	});
 	pi.on("session_shutdown", (_event, ctx) => {
+		routeReports.close();
 		if (ctx.hasUI) ctx.ui.setStatus("context-paging", undefined);
+	});
+	pi.on("turn_start", (_event, ctx) => {
+		routeReports.open(modelKey(ctx.model));
+	});
+	// A request that ends before the context hook, such as a failed route, ends here.
+	pi.on("message_end", (event) => {
+		if (event.message.role === "assistant") routeReports.close();
+	});
+	pi.on("agent_end", () => {
+		routeReports.close();
 	});
 	pi.on("turn_end", (event, ctx) => {
 		usageTracker.recordResponse(event.message);
@@ -224,12 +236,14 @@ export default function contextPagingExtension(
 		refreshSafely(ctx);
 	});
 	pi.on("session_tree", (_event, ctx) => {
+		routeReports.close();
 		resetPagingState();
 		invalidatingBranchEntries = new Set();
 		omittedFailureEntries = new Set();
 		refreshSafely(ctx, true);
 	});
 	pi.on("model_select", () => {
+		routeReports.close();
 		resetPagingState();
 	});
 	pi.on("session_compact", (event) => {
@@ -240,7 +254,7 @@ export default function contextPagingExtension(
 	});
 	pi.on("context", (event, ctx) => {
 		// Take the report even when disabled, so it cannot apply to a later request.
-		const routeReport = routeReports.take();
+		const routeReport = routeReports.take(modelKey(ctx.model));
 		if (!isEnabled()) return;
 		warnAboutTrimTarget(ctx);
 
