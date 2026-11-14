@@ -121,6 +121,13 @@ The effective budget never exceeds the context window of the active model.
 If the model window is smaller than the budget, the extension scales the target by the same ratio.
 The minimum target is one token.
 
+A [virtual model](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/virtual-models.md) routes each request to a physical model.
+Pi does not tell extensions which physical model the current request uses.
+If the virtual model declares `contextWindow`, the effective budget never exceeds it.
+If it does not, the window is unknown, and the effective budget is `tokenBudget`.
+Either way, set `tokenBudget` no higher than the smallest context window the router can choose.
+The extension cancels Pi's automatic compaction, so nothing else stops a request that is too large for the routed model.
+
 Both token settings accept positive safe integers only.
 The extension does not convert strings, fractions, or other invalid values.
 An invalid project value does not apply. The extension then uses the global value, or the default.

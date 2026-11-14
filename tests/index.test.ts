@@ -1098,6 +1098,29 @@ test("model switches reset the frontier in both window-size directions", async (
 	assert.equal(harness.abortCalls(), 0);
 });
 
+test("a virtual model without a declared window pages to the configured budget", async () => {
+	const harness = createHarness({ globalSettings: { contextPaging: { tokenBudget: 64_000 } }, projectTrusted: false });
+	const messages = ["VIRTUAL_A", "VIRTUAL_B", "VIRTUAL_C"].flatMap((id) => [user(id), assistant(`${id} ${"x".repeat(240_000)}`)]);
+	messages.push(user("VIRTUAL_ACTIVE"));
+	harness.setBranch(messages.map((message, index) => entry(`virtual-${index}`, message)));
+	Object.assign(harness.ctx.model, { api: "pi-virtual", contextWindow: 0 });
+	const selected = await emit(harness, "context", { messages }) as any;
+	assert.equal(harness.abortCalls(), 0);
+	assert.deepEqual(harness.notifications.filter((item) => item.level === "error"), []);
+	assert.equal(hasMarker(selected.messages, "VIRTUAL_C"), false);
+	assert.equal(hasMarker(selected.messages, "VIRTUAL_ACTIVE"), true);
+});
+
+test("a physical model with a zero window still aborts the provider call", async () => {
+	const harness = createHarness({ globalSettings: { contextPaging: { tokenBudget: 128_000 } }, projectTrusted: false });
+	const messages = [user("PHYSICAL_ACTIVE")];
+	harness.setBranch(messages.map((message, index) => entry(`physical-${index}`, message)));
+	harness.ctx.model.contextWindow = 0;
+	await emit(harness, "context", { messages });
+	assert.equal(harness.abortCalls(), 1);
+	assert.ok(harness.notifications.some((item) => item.level === "error" && /context-window estimate is invalid/.test(item.message)));
+});
+
 test("a fresh extension has no prior frontier", async (t) => {
 	const commits = t.mock.method(ContextCutState.prototype, "commit");
 	const old = resetFixture();
