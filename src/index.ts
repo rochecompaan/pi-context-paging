@@ -57,6 +57,14 @@ function errorMessage(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
 }
 
+// Pi reports an unset virtual-model window as 0. That window is unknown, so the configured
+// budget applies; the routed physical model is not visible to this hook. Invalid physical
+// windows still fail closed.
+function modelContextWindow(model: ExtensionContext["model"]): number | undefined {
+	if (model?.api === "pi-virtual" && (model.contextWindow === 0 || model.contextWindow === undefined)) return undefined;
+	return model?.contextWindow;
+}
+
 function activeResidentTools(pi: ExtensionAPI): ResidentToolDefinition[] {
 	const activeNames = new Set(pi.getActiveTools());
 	return pi.getAllTools()
@@ -235,7 +243,7 @@ export default function contextPagingExtension(
 				try {
 					// A model window below tokenBudget scales the target down, so we show the target selection will use.
 					effective = contextTokenLimits({
-						tokenBudget, trimToTokens: requested, modelContextWindow: ctx.model?.contextWindow,
+						tokenBudget, trimToTokens: requested, modelContextWindow: modelContextWindow(ctx.model),
 					}).trimToTokens;
 				} catch (error) {
 					ctx.ui.notify(`Context paging cannot rotate: ${errorMessage(error)}`, "warning");
@@ -328,7 +336,7 @@ export default function contextPagingExtension(
 				event.messages, residentTokens, ctx.getContextUsage()?.tokens, canonicalSessionMessages ?? [],
 			);
 			const selectionLimits = {
-				modelContextWindow: ctx.model?.contextWindow,
+				modelContextWindow: modelContextWindow(ctx.model),
 				tokenBudget: resolvedSettings.tokenBudget,
 				trimToTokens: rotation?.trimToTokens ?? resolvedSettings.trimToTokens,
 			};
