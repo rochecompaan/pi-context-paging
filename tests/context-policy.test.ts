@@ -916,3 +916,60 @@ test("does not mutate canonical or raw inputs while paging", () => {
 	assert.deepEqual(messages, messagesBefore);
 	assert.deepEqual(rawHistoryItems, rawHistoryBefore);
 });
+
+test("rotates early when above trimToTokens within tokenBudget and keeps within-budget when already below", () => {
+	const turnA = [user("ROTATE_A request"), assistant(`ROTATE_A ${"x".repeat(4_000)}`)];
+	const turnB = [user("ROTATE_B request"), assistant(`ROTATE_B ${"x".repeat(4_000)}`)];
+	const active = user("ROTATE_ACTIVE");
+	const messages = [...turnA, ...turnB, active];
+	const rawHistoryItems: HistoryItem[] = [
+		{ id: "rot-a-req", kind: "user", sequence: 0, timestamp: "2026-09-21T00:00:00.000Z", userMessage: turnA[0] as any },
+		{
+			id: "rot-a-ans", kind: "modelTurn", sequence: 1, timestamp: "2026-09-21T00:00:00.000Z",
+			assistantMessage: turnA[1] as any, toolResults: [], metadata: { tools: [], files: [], failed: false },
+		},
+		{ id: "rot-b-req", kind: "user", sequence: 2, timestamp: "2026-09-21T00:00:00.000Z", userMessage: turnB[0] as any },
+		{
+			id: "rot-b-ans", kind: "modelTurn", sequence: 3, timestamp: "2026-09-21T00:00:00.000Z",
+			assistantMessage: turnB[1] as any, toolResults: [], metadata: { tools: [], files: [], failed: false },
+		},
+		{ id: "rot-act", kind: "user", sequence: 4, timestamp: "2026-09-21T00:00:00.000Z", userMessage: active as any },
+	];
+
+	const unrotated = selectContext({
+		messages: messages as any, systemPrompt: "", activeTools: [], modelContextWindow: 100_000,
+		tokenBudget: 5_000, trimToTokens: 1_500, rawHistoryItems,
+	});
+	assert.equal(unrotated.mode, "within-budget");
+	assert.equal(unrotated.cutState, undefined);
+
+	const rotated = selectContext({
+		messages: messages as any, systemPrompt: "", activeTools: [], modelContextWindow: 100_000,
+		tokenBudget: 5_000, trimToTokens: 1_500, rotate: true, rawHistoryItems,
+	});
+	assert.equal(rotated.mode, "paged");
+	assert.ok(rotated.cutState);
+	assert.equal(hasMarker(rotated.messages, "ROTATE_A request"), false);
+	assert.match(marker(rotated.messages[0]), /5,000-token rolling window/);
+
+	const nextTurn = selectContext({
+		messages: messages as any, systemPrompt: "", activeTools: [], modelContextWindow: 100_000,
+		tokenBudget: 5_000, trimToTokens: 3_125, cutState: rotated.cutState, rawHistoryItems,
+	});
+	assert.equal(nextTurn.mode, "paged");
+	assert.equal(hasMarker(nextTurn.messages, "ROTATE_A request"), false);
+
+	const alreadyBelow = selectContext({
+		messages: [active] as any, systemPrompt: "", activeTools: [], modelContextWindow: 100_000,
+		tokenBudget: 5_000, trimToTokens: 1_500, rotate: true, rawHistoryItems: [rawHistoryItems.at(-1)!],
+	});
+	assert.equal(alreadyBelow.mode, "within-budget");
+	assert.equal(alreadyBelow.cutState, undefined);
+
+	const activeLargerThanTrim = selectContext({
+		messages: [user(`ACTIVE_BIG ${"x".repeat(8_000)}`)] as any, systemPrompt: "", activeTools: [],
+		modelContextWindow: 100_000, tokenBudget: 5_000, trimToTokens: 500, rotate: true, rawHistoryItems: [],
+	});
+	assert.equal(activeLargerThanTrim.mode, "within-budget");
+	assert.equal(activeLargerThanTrim.cutState, undefined);
+});

@@ -879,6 +879,58 @@ test("context-paging preserves a cut for status and repeated on but resets it ac
 	assert.equal(hasNotice(restored.messages), false);
 });
 
+test("context-paging rotate advances the cut on the next request and supports an explicit token target", async () => {
+	const { harness, messages } = resetFixture();
+	harness.ctx.getSystemPrompt = () => "system";
+
+	const before = await emit(harness, "context", { messages }) as any;
+	assert.equal(hasMarker(before.messages, "RESET_A request"), true);
+	assert.equal(hasNotice(before.messages), false);
+
+	await runPagingCommand(harness, "rotate");
+	assert.equal(harness.notifications.at(-1)!.level, "info");
+	assert.match(harness.notifications.at(-1)!.message, /rotate to 625 tokens/);
+
+	const rotated = await emit(harness, "context", { messages }) as any;
+	assert.equal(hasMarker(rotated.messages, "RESET_A request"), false);
+	assert.equal(hasMarker(rotated.messages, "RESET_C request"), true);
+	assert.match(marker(rotated.messages[0]), /1,000-token rolling window/);
+
+	const subsequent = await emit(harness, "context", { messages }) as any;
+	assert.deepEqual(subsequent.messages, rotated.messages);
+
+	await runPagingCommand(harness, "rotate 200");
+	assert.match(harness.notifications.at(-1)!.message, /rotate to 200 tokens/);
+	const deeper = await emit(harness, "context", { messages }) as any;
+	assert.equal(hasMarker(deeper.messages, "RESET_C request"), false);
+});
+
+test("context-paging rotate rejects disabled sessions, bad targets, and clears across state resets", async () => {
+	const disabled = resetFixture(false);
+	disabled.harness.ctx.getSystemPrompt = () => "system";
+	await runPagingCommand(disabled.harness, "rotate");
+	assert.equal(disabled.harness.notifications.at(-1)!.level, "warning");
+	assert.match(disabled.harness.notifications.at(-1)!.message, /disabled/);
+	await runPagingCommand(disabled.harness, "on");
+	const unrotated = await emit(disabled.harness, "context", { messages: disabled.messages }) as any;
+	assert.equal(hasMarker(unrotated.messages, "RESET_A request"), true);
+
+	for (const bad of ["rotate 0", "rotate -5", "rotate abc", "rotate 300 extra"]) {
+		await runPagingCommand(disabled.harness, bad);
+		assert.equal(disabled.harness.notifications.at(-1)!.level, "warning");
+		assert.match(disabled.harness.notifications.at(-1)!.message, /Usage:.*rotate/);
+	}
+
+	for (const reset of ["session_tree", "model_select", "session_compact"] as const) {
+		const { harness, messages } = resetFixture();
+		harness.ctx.getSystemPrompt = () => "system";
+		await runPagingCommand(harness, "rotate");
+		await emit(harness, reset, reset === "session_compact" ? { compactionEntry: { id: "c1" } } : {});
+		const afterReset = await emit(harness, "context", { messages }) as any;
+		assert.equal(hasMarker(afterReset.messages, "RESET_A request"), true);
+	}
+});
+
 test("context-paging resets its override at every session start", async () => {
 	for (const enabled of [true, false]) {
 		const harness = createHarness({ globalSettings: { contextPaging: { enabled } }, projectTrusted: false });

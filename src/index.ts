@@ -66,6 +66,18 @@ function persistentSessionMessages(ctx: ExtensionContext): AgentMessage[] {
 }
 
 type BranchEdits = { invalidating: string[]; omittedFailures: string[] };
+type RotateCommand = { kind: "none" } | { kind: "invalid" } | { kind: "rotate"; trimToTokens?: number };
+
+const COMMAND_USAGE = "Usage: /context-paging [on|off|rotate [tokens]|status|stats]";
+
+function parseRotateCommand(action: string): RotateCommand {
+	const parts = action.split(/\s+/u);
+	if (parts[0] !== "rotate") return { kind: "none" };
+	if (parts.length === 1) return { kind: "rotate" };
+	if (parts.length > 2 || !/^[1-9]\d*$/u.test(parts[1]!)) return { kind: "invalid" };
+	const trimToTokens = Number(parts[1]!);
+	return Number.isSafeInteger(trimToTokens) ? { kind: "rotate", trimToTokens } : { kind: "invalid" };
+}
 
 /** Separates history-changing edits from Pi retry edits that omit failed responses no request sent. */
 function branchEdits(branch: readonly SessionEntry[]): BranchEdits {
@@ -101,11 +113,13 @@ export default function contextPagingExtension(
 	const usageTracker = new ContextUsageTracker();
 	const cutState = new ContextCutState();
 	let latestInput: InputTokenCount | undefined;
+	let pendingRotation: { trimToTokens?: number } | undefined;
 	const warnedSettingPairs = new Set<string>();
 	const resetPagingState = () => {
 		usageTracker.clear();
 		cutState.reset();
 		latestInput = undefined;
+		pendingRotation = undefined;
 	};
 	const warnAboutTrimTarget = (ctx: ExtensionContext) => {
 		const { tokenBudget, trimToTokens, trimToTokensExplicit } = resolvedSettings;
@@ -168,7 +182,7 @@ export default function contextPagingExtension(
 	};
 
 	pi.registerCommand("context-paging", {
-		description: "Enable or disable context paging for this session, or show status and stats",
+		description: "Enable, disable, or rotate context paging for this session, or show status and stats",
 		handler: async (args, ctx) => {
 			const action = args.trim();
 			if (action === "stats") {
@@ -179,13 +193,28 @@ export default function contextPagingExtension(
 				}
 				return;
 			}
+			const rotateCommand = parseRotateCommand(action);
+			if (rotateCommand.kind === "invalid") {
+				ctx.ui.notify(COMMAND_USAGE, "warning");
+				return;
+			}
+			if (rotateCommand.kind === "rotate") {
+				if (!isEnabled()) {
+					ctx.ui.notify("Context paging is disabled for this session.", "warning");
+					return;
+				}
+				pendingRotation = { trimToTokens: rotateCommand.trimToTokens };
+				const target = rotateCommand.trimToTokens ?? resolvedSettings.trimToTokens;
+				ctx.ui.notify(`Context paging will rotate to ${target.toLocaleString("en-US")} tokens on the next request.`, "info");
+				return;
+			}
 			if (action === "on" || action === "off") {
 				const enabled = action === "on";
 				if (enabled !== isEnabled()) resetPagingState();
 				sessionEnabled = enabled;
 				publishStatus(ctx);
 			} else if (action !== "" && action !== "status") {
-				ctx.ui.notify("Usage: /context-paging [on|off|status|stats]", "warning");
+				ctx.ui.notify(COMMAND_USAGE, "warning");
 				return;
 			}
 			ctx.ui.notify(`Context paging is ${isEnabled() ? "enabled" : "disabled"} for this session.`, "info");
@@ -248,6 +277,9 @@ export default function contextPagingExtension(
 			ctx.ui.notify(`Context paging history is unavailable: ${errorMessage(error)}`, "error");
 		}
 
+		// Consume the one-shot rotation before selection so subsequent tool calls in the turn keep the new prefix.
+		const rotation = pendingRotation;
+		pendingRotation = undefined;
 		try {
 			const systemPrompt = ctx.getSystemPrompt();
 			const activeTools = activeResidentTools(pi);
@@ -264,7 +296,8 @@ export default function contextPagingExtension(
 				activeTools,
 				modelContextWindow: ctx.model?.contextWindow,
 				tokenBudget: resolvedSettings.tokenBudget,
-				trimToTokens: resolvedSettings.trimToTokens,
+				trimToTokens: rotation?.trimToTokens ?? resolvedSettings.trimToTokens,
+				rotate: rotation !== undefined,
 				cutState: cutState.prepare(rawHistoryItems),
 				contextTokens,
 				tokenEstimates: usageTracker.tokenEstimates,

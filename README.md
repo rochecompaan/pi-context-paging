@@ -139,6 +139,7 @@ Use `/context-paging` to change paging for the current session only:
 | --- | --- |
 | `/context-paging on` | Enable paging and recovery tools. |
 | `/context-paging off` | Disable paging and recovery tools. Pi uses its normal context and automatic compaction behavior. |
+| `/context-paging rotate [tokens]` | Trim on the next request to `trimToTokens` (or `tokens`), within budget too. |
 | `/context-paging` or `/context-paging status` | Show whether paging is enabled or disabled. |
 | `/context-paging stats` | Show saved history size, latest request input, and whole-session cache totals. |
 

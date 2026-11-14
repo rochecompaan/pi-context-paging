@@ -28,6 +28,8 @@ export type ContextSelectionInput = {
 	tokenBudget: number;
 	/** FIFO advance destination; omission derives the adaptive target from tokenBudget. */
 	trimToTokens?: number;
+	/** Advance the stateful cut to trimToTokens even when input fits within tokenBudget. */
+	rotate?: boolean;
 	/** A provider-backed full-context estimate, when its usage basis is known. */
 	contextTokens?: number;
 	/** Provider-backed resident and per-message costs aligned with the original input. */
@@ -569,7 +571,8 @@ export function selectContext(input: ContextSelectionInput): ContextSelection {
 	if (contextTokens === undefined && residentTokens > budgetTokens) {
 		throw error("RESIDENT_INPUT_TOO_LARGE", `Resident input estimate ${residentTokens} exceeds budget estimate ${budgetTokens}.`, residentTokens, residentTokens, budgetTokens);
 	}
-	if (!input.cutState && calibrated(rawFullEstimate) <= budgetTokens) {
+	const initialTrigger = input.rotate ? Math.min(targetTokens, budgetTokens) : budgetTokens;
+	if (!input.cutState && calibrated(rawFullEstimate) <= initialTrigger) {
 		return { messages, estimatedTokens: reported(rawFullEstimate), budgetTokens, mode: "within-budget", cutState: undefined };
 	}
 	const history = new SelectionHistoryLookup(input.rawHistoryItems);
@@ -611,7 +614,9 @@ export function selectContext(input: ContextSelectionInput): ContextSelection {
 			return { selection: { messages: viewMessages(view, count, outgoingNotice, replacement), estimatedTokens: reported(estimate), budgetTokens, mode, cutState: undefined },
 				normalNotice: notice, removedCount: count, lastKeyed, lastWasKeyless, cutFailure };
 		};
-		if (calibrated(retained + noticeTokens) <= budgetTokens) return finish(previous ? "paged" : "within-budget");
+		// Early rotation applies only to stateful cuts so fallback never causes a one-turn stateless bounce.
+		const trigger = input.rotate && stateful ? Math.min(destination, budgetTokens) : budgetTokens;
+		if (calibrated(retained + noticeTokens) <= trigger) return finish(previous ? "paged" : "within-budget");
 		if (view.grouped.activeTurn && calibrated(requestTokens(view)) > budgetTokens) {
 			const estimatedTokens = reported(requestTokens(view));
 			throw error("ACTIVE_REQUEST_TOO_LARGE", `Resident plus active request estimate ${estimatedTokens} exceeds budget estimate ${budgetTokens}.`, residentTokens, estimatedTokens, budgetTokens);
@@ -623,7 +628,9 @@ export function selectContext(input: ContextSelectionInput): ContextSelection {
 					notice = pagingNotice(budgetTokens, evictedId, toolReference, conversation, noticeCharacters);
 					noticeTokens = estimateTokens(notice);
 				}
-				if (calibrated(retained + noticeTokens) <= budgetTokens) return finish("paged");
+				if (calibrated(retained + noticeTokens) <= budgetTokens) {
+					return finish(previous || count > 0 ? "paged" : "within-budget");
+				}
 				if (protectedExchange) {
 					const overflow = protectedOverflowNotice(budgetTokens);
 					if (calibrated(retained + messageEstimate(overflow, cache)) <= modelLimit) return finish("protected-overflow", overflow);
