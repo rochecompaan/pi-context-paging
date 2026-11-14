@@ -99,6 +99,13 @@ The existing positive-finite model-window validation remains separate.
 Integral scaling and adaptive defaults use exact integer arithmetic near the safe-integer limit.
 
 The effective budget is the smaller of the configured budget and model window, when the window exists.
+`routed-model.ts` resolves that window for each request.
+For a physical model, it is the model's own window.
+For a virtual model, Pi exposes only the selection, not the routed model.
+A router can report the routed model from `route()` on the `context-paging:route` event channel, with `{ version: 1, provider, id }`.
+The extension keeps the newest report and uses it in the next `context` event only, even when paging is off.
+It reads the window from `ctx.modelRegistry`. A model that is missing, or virtual, aborts the provider call; an invalid physical window fails the existing validation.
+Without a report, the virtual model's declared window applies. Pi reports an unset window as `0`, which the extension treats as unknown, so the configured budget applies.
 The effective target is `max(1, floor(trimToTokens * effectiveBudget / tokenBudget))`.
 For a target at or above the configured budget, the cut destination is the effective budget instead.
 An explicit high target produces one warning per resolved budget/target pair per extension instance.
@@ -258,6 +265,7 @@ The `context` event prepares usage from the original request, applies the select
 The `turn_end` event records response usage.
 Successful `session_start` events cover new sessions, resumes, and forks. Successful `session_tree` events cover branch navigation.
 These events reset cut state and accounting. Every actual `model_select` resets both, in either window-size direction.
+A `context` event whose limits come from a different model than the previous one also resets both. Under a virtual model, that covers a change of reported route.
 Successful `session_compact` events and newly projected compaction or `context_edit` entries also reset both.
 One `context_edit` is an exception: Pi's retry edit that omits a failed or aborted assistant response.
 That response was never sent, so the cut stays. The edit clears accounting only, because Pi's usage status then estimates the whole projection until the next measured response.

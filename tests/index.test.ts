@@ -79,8 +79,17 @@ function createHarness(settings: Settings | null = { globalSettings: {}, project
 	let appends = 0;
 	let contextUsage: unknown;
 	let activeTools = ["small", "missing"];
+	const listeners = new Map<string, Array<(data: unknown) => void>>();
+	const models: Array<{ provider: string; id: string; contextWindow: number }> = [];
 	const pi = {
 		on(name: string, handler: Handler) { handlers.set(name, handler); },
+		events: {
+			on(channel: string, listener: (data: unknown) => void) {
+				listeners.set(channel, [...listeners.get(channel) ?? [], listener]);
+				return () => {};
+			},
+			emit(channel: string, data: unknown) { for (const listener of listeners.get(channel) ?? []) listener(data); },
+		},
 		registerCommand(name: string, command: Omit<RegisteredCommand, "name" | "sourceInfo">) { commands.set(name, command); },
 		registerTool(tool: any) { tools.push(tool); },
 		appendEntry() { appends++; },
@@ -106,7 +115,8 @@ function createHarness(settings: Settings | null = { globalSettings: {}, project
 		getSystemPrompt: () => "system",
 		getContextUsage: () => contextUsage,
 		isProjectTrusted: () => false,
-		model: { contextWindow: 64_000 },
+		model: { contextWindow: 64_000 } as { contextWindow: number; api?: string; provider?: string; id?: string },
+		modelRegistry: { find: (provider: string, id: string) => models.find((model) => model.provider === provider && model.id === id) },
 		ui: { notify: (message: string, level: string) => notifications.push({ message, level }) },
 		abort: () => { aborts++; },
 	};
@@ -127,6 +137,8 @@ function createHarness(settings: Settings | null = { globalSettings: {}, project
 		appendCalls: () => appends,
 		setContextUsage: (next: unknown) => { contextUsage = next; },
 		setActiveTools: (next: string[]) => { activeTools = next; },
+		addModel: (model: { provider: string; id: string; contextWindow: number }) => { models.push(model); },
+		emitEvent: (channel: string, data: unknown) => pi.events.emit(channel, data),
 	};
 }
 
@@ -1118,6 +1130,66 @@ test("a physical model with a zero window still aborts the provider call", async
 	harness.ctx.model.contextWindow = 0;
 	await emit(harness, "context", { messages });
 	assert.equal(harness.abortCalls(), 1);
+	assert.ok(harness.notifications.some((item) => item.level === "error" && /context-window estimate is invalid/.test(item.message)));
+});
+
+function routedFixture() {
+	const harness = createHarness({ globalSettings: { contextPaging: { tokenBudget: 128_000 } }, projectTrusted: false });
+	Object.assign(harness.ctx.model, { api: "pi-virtual", provider: "router", id: "auto", contextWindow: 128_000 });
+	harness.addModel({ provider: "lab", id: "large", contextWindow: 128_000 });
+	harness.addModel({ provider: "lab", id: "small", contextWindow: 64_000 });
+	const messages = ["ROUTE_A", "ROUTE_B", "ROUTE_C"].flatMap((id) => [user(id), assistant(`${id} ${"x".repeat(240_000)}`)]);
+	messages.push(user("ROUTE_ACTIVE"));
+	harness.setBranch(messages.map((message, index) => entry(`route-${index}`, message)));
+	const request = async (route?: unknown) => {
+		if (route !== undefined) harness.emitEvent("context-paging:route", route);
+		return await emit(harness, "context", { messages: structuredClone(messages) }) as any;
+	};
+	return { harness, request };
+}
+
+test("a reported route sets the window for that request, in both size directions", async () => {
+	const { harness, request } = routedFixture();
+	const large = await request({ version: 1, provider: "lab", id: "large" });
+	assert.equal(hasMarker(large.messages, "ROUTE_C"), true);
+	const small = await request({ version: 1, provider: "lab", id: "small" });
+	assert.equal(hasMarker(small.messages, "ROUTE_C"), false);
+	assert.equal(hasMarker(small.messages, "ROUTE_ACTIVE"), true);
+	const largeAgain = await request({ version: 1, provider: "lab", id: "large" });
+	assert.equal(hasMarker(largeAgain.messages, "ROUTE_C"), true);
+	assert.equal(harness.abortCalls(), 0);
+});
+
+test("a route report applies to one request only", async () => {
+	const { harness, request } = routedFixture();
+	harness.ctx.model.contextWindow = 0;
+	const small = await request({ version: 1, provider: "lab", id: "small" });
+	assert.equal(hasMarker(small.messages, "ROUTE_C"), false);
+	const unreported = await request();
+	assert.equal(hasMarker(unreported.messages, "ROUTE_C"), true);
+	assert.equal(harness.abortCalls(), 0);
+});
+
+test("route reports are ignored for physical models and unknown payloads", async () => {
+	const { harness, request } = routedFixture();
+	for (const route of [{ version: 2, provider: "lab", id: "small" }, { version: 1, provider: "lab" }, "lab/small"]) {
+		const selected = await request(route);
+		assert.equal(hasMarker(selected.messages, "ROUTE_C"), true);
+	}
+	Object.assign(harness.ctx.model, { api: "lab-api", provider: "lab", id: "large" });
+	const physical = await request({ version: 1, provider: "lab", id: "small" });
+	assert.equal(hasMarker(physical.messages, "ROUTE_C"), true);
+	assert.equal(harness.abortCalls(), 0);
+});
+
+test("a reported route that cannot be resolved aborts the provider call", async () => {
+	const { harness, request } = routedFixture();
+	harness.addModel({ provider: "lab", id: "broken", contextWindow: 0 });
+	await request({ version: 1, provider: "lab", id: "missing" });
+	assert.equal(harness.abortCalls(), 1);
+	assert.ok(harness.notifications.some((item) => item.level === "error" && /lab\/missing/.test(item.message)));
+	await request({ version: 1, provider: "lab", id: "broken" });
+	assert.equal(harness.abortCalls(), 2);
 	assert.ok(harness.notifications.some((item) => item.level === "error" && /context-window estimate is invalid/.test(item.message)));
 });
 
