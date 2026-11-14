@@ -1,0 +1,63 @@
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+
+/**
+ * Pi does not tell the `context` hook which physical model a virtual model routed the
+ * request to. A router can say so on this channel from `route()`, which Pi calls before
+ * the hook for the same request:
+ *
+ *     pi.events.emit("context-paging:route", { version: 1, provider: model.provider, id: model.id });
+ */
+export const ROUTE_CHANNEL = "context-paging:route";
+
+type RouteReport = { provider: string; id: string };
+
+export type RequestLimits = {
+	/** The context window to page against; `undefined` means unknown. */
+	contextWindow: number | undefined;
+	/** Identifies the model whose limits apply, so a change can reset paging state. */
+	key: string;
+};
+
+function parseRouteReport(data: unknown): RouteReport | undefined {
+	if (typeof data !== "object" || data === null) return undefined;
+	const { version, provider, id } = data as Record<string, unknown>;
+	if (version !== 1 || typeof provider !== "string" || typeof id !== "string") return undefined;
+	return { provider, id };
+}
+
+/** Holds the latest route report until the next `context` hook takes it. */
+export class RouteReports {
+	#pending: RouteReport | undefined;
+
+	constructor(pi: ExtensionAPI) {
+		// The newest report wins; one this version cannot read clears an older one.
+		pi.events.on(ROUTE_CHANNEL, (data) => { this.#pending = parseRouteReport(data); });
+	}
+
+	/** Returns the report for the current request and forgets it. */
+	take(): RouteReport | undefined {
+		const report = this.#pending;
+		this.#pending = undefined;
+		return report;
+	}
+}
+
+/** Resolves the limits of the model the current request uses. */
+export function requestLimits(ctx: ExtensionContext, report: RouteReport | undefined): RequestLimits {
+	const model = ctx.model;
+	if (model?.api !== "pi-virtual") {
+		return { contextWindow: model?.contextWindow, key: `${model?.provider}/${model?.id}` };
+	}
+	if (report) {
+		const routed = ctx.modelRegistry.find(report.provider, report.id);
+		if (!routed || routed.api === "pi-virtual") {
+			throw new Error(`The router reported ${report.provider}/${report.id}, which is not a physical model in the registry.`);
+		}
+		// Invalid physical windows reach context selection and fail closed there.
+		return { contextWindow: routed.contextWindow, key: `${routed.provider}/${routed.id}` };
+	}
+	// Pi reports an unset virtual-model window as 0. That window is unknown, so the
+	// configured budget applies.
+	const unknown = model.contextWindow === 0 || model.contextWindow === undefined;
+	return { contextWindow: unknown ? undefined : model.contextWindow, key: `${model.provider}/${model.id}` };
+}

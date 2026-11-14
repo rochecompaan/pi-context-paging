@@ -17,6 +17,7 @@ import { isRecoverableHistoryItem } from "./recovery-content.ts";
 import { HistoryNavigator } from "./navigator.ts";
 import { registerContextPagingTools, type HistorySnapshot } from "./tools.ts";
 import { contextPagingStats, reportedInputTokens, type InputTokenCount } from "./stats.ts";
+import { requestLimits, RouteReports, type RequestLimits } from "./routed-model.ts";
 
 import {
 	resolveContextPagingSettings,
@@ -55,14 +56,6 @@ async function loadSettings(ctx: ExtensionContext): Promise<ContextPagingSetting
 
 function errorMessage(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
-}
-
-// Pi reports an unset virtual-model window as 0. That window is unknown, so the configured
-// budget applies; the routed physical model is not visible to this hook. Invalid physical
-// windows still fail closed.
-function modelContextWindow(model: ExtensionContext["model"]): number | undefined {
-	if (model?.api === "pi-virtual" && (model.contextWindow === 0 || model.contextWindow === undefined)) return undefined;
-	return model?.contextWindow;
 }
 
 function activeResidentTools(pi: ExtensionAPI): ResidentToolDefinition[] {
@@ -139,6 +132,8 @@ export default function contextPagingExtension(
 	let projectionWatermark: ProjectionWatermark | undefined;
 	let latestInput: InputTokenCount | undefined;
 	let pendingRotation: { trimToTokens?: number } | undefined;
+	const routeReports = new RouteReports(pi);
+	let limitsKey: string | undefined;
 	const warnedSettingPairs = new Set<string>();
 	const resetPagingState = () => {
 		usageTracker.clear();
@@ -243,7 +238,7 @@ export default function contextPagingExtension(
 				try {
 					// A model window below tokenBudget scales the target down, so we show the target selection will use.
 					effective = contextTokenLimits({
-						tokenBudget, trimToTokens: requested, modelContextWindow: modelContextWindow(ctx.model),
+						tokenBudget, trimToTokens: requested, modelContextWindow: requestLimits(ctx, undefined).contextWindow,
 					}).trimToTokens;
 				} catch (error) {
 					ctx.ui.notify(`Context paging cannot rotate: ${errorMessage(error)}`, "warning");
@@ -310,8 +305,22 @@ export default function contextPagingExtension(
 		if (id) invalidatingBranchEntries.add(id);
 	});
 	pi.on("context", (event, ctx) => {
+		// Take the report even when disabled, so it cannot apply to a later request.
+		const routeReport = routeReports.take();
 		if (!isEnabled()) return;
 		warnAboutTrimTarget(ctx);
+
+		let limits: RequestLimits;
+		try {
+			limits = requestLimits(ctx, routeReport);
+		} catch (error) {
+			ctx.abort();
+			ctx.ui.notify(`Context paging aborted this provider call: ${errorMessage(error)}`, "error");
+			return { messages: event.messages };
+		}
+		// A virtual model can route each request to a different model, which is a model switch.
+		if (limitsKey !== undefined && limitsKey !== limits.key) resetPagingState();
+		limitsKey = limits.key;
 
 		let rawHistoryItems: readonly HistoryItem[] | undefined;
 		try {
@@ -336,7 +345,7 @@ export default function contextPagingExtension(
 				event.messages, residentTokens, ctx.getContextUsage()?.tokens, canonicalSessionMessages ?? [],
 			);
 			const selectionLimits = {
-				modelContextWindow: modelContextWindow(ctx.model),
+				modelContextWindow: limits.contextWindow,
 				tokenBudget: resolvedSettings.tokenBudget,
 				trimToTokens: rotation?.trimToTokens ?? resolvedSettings.trimToTokens,
 			};
