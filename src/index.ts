@@ -3,8 +3,10 @@ import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext, SessionEntry } from "@earendil-works/pi-coding-agent";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import {
+	contextTokenLimits,
 	residentTokenEstimate,
 	selectContext,
+	type ContextSelection,
 	type ResidentToolDefinition,
 } from "./context-policy.ts";
 import { ContextUsageTracker } from "./context-usage.ts";
@@ -77,6 +79,16 @@ function parseRotateCommand(action: string): RotateCommand {
 	if (parts.length > 2 || !/^[1-9]\d*$/u.test(parts[1]!)) return { kind: "invalid" };
 	const trimToTokens = Number(parts[1]!);
 	return Number.isSafeInteger(trimToTokens) ? { kind: "rotate", trimToTokens } : { kind: "invalid" };
+}
+
+/** Reports what a consumed rotation did, because the queue notice cannot know whether the cut will move. */
+function rotationOutcome(selection: ContextSelection): { message: string; level: "info" | "warning" } {
+	if (selection.advanced) {
+		const tokens = selection.estimatedTokens.toLocaleString("en-US");
+		return { message: `Context paging rotated to ${tokens} tokens.`, level: "info" };
+	}
+	const reason = selection.cutFallbackReason ?? "context is already below the rotation target";
+	return { message: `Context paging skipped the rotation: ${reason}.`, level: "warning" };
 }
 
 /** Separates history-changing edits from Pi retry edits that omit failed responses no request sent. */
@@ -203,9 +215,25 @@ export default function contextPagingExtension(
 					ctx.ui.notify("Context paging is disabled for this session.", "warning");
 					return;
 				}
+				const { tokenBudget } = resolvedSettings;
+				const requested = rotateCommand.trimToTokens ?? resolvedSettings.trimToTokens;
+				// selectContext caps the target at the budget, so a target at or above it would rotate nothing.
+				if (tokenBudget <= requested) {
+					ctx.ui.notify(`Rotation target must be below the ${tokenBudget.toLocaleString("en-US")}-token budget.`, "warning");
+					return;
+				}
+				let effective: number;
+				try {
+					// A model window below tokenBudget scales the target down, so we show the target selection will use.
+					effective = contextTokenLimits({
+						tokenBudget, trimToTokens: requested, modelContextWindow: ctx.model?.contextWindow,
+					}).trimToTokens;
+				} catch (error) {
+					ctx.ui.notify(`Context paging cannot rotate: ${errorMessage(error)}`, "warning");
+					return;
+				}
 				pendingRotation = { trimToTokens: rotateCommand.trimToTokens };
-				const target = rotateCommand.trimToTokens ?? resolvedSettings.trimToTokens;
-				ctx.ui.notify(`Context paging will rotate to ${target.toLocaleString("en-US")} tokens on the next request.`, "info");
+				ctx.ui.notify(`Context paging will rotate to ${effective.toLocaleString("en-US")} tokens on the next request.`, "info");
 				return;
 			}
 			if (action === "on" || action === "off") {
@@ -277,9 +305,8 @@ export default function contextPagingExtension(
 			ctx.ui.notify(`Context paging history is unavailable: ${errorMessage(error)}`, "error");
 		}
 
-		// Consume the one-shot rotation before selection so subsequent tool calls in the turn keep the new prefix.
+		// The rotation stays queued until selection succeeds, so an aborted provider call does not lose it.
 		const rotation = pendingRotation;
-		pendingRotation = undefined;
 		try {
 			const systemPrompt = ctx.getSystemPrompt();
 			const activeTools = activeResidentTools(pi);
@@ -307,6 +334,12 @@ export default function contextPagingExtension(
 			// Unknown canonical provenance is an empty trusted subset, never the outgoing request.
 			usageTracker.recordSelection(selection.messages, residentTokens, canonicalSessionMessages ?? []);
 			cutState.commit(selection.cutState);
+			if (rotation) {
+				// Cleared alongside the commit: this handler is synchronous, so later tool calls in the turn do not rotate again.
+				pendingRotation = undefined;
+				const outcome = rotationOutcome(selection);
+				ctx.ui.notify(outcome.message, outcome.level);
+			}
 			latestInput = { tokens: selection.estimatedTokens, estimated: true };
 			return { messages: selection.messages };
 		} catch (error) {

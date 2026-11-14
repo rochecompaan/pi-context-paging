@@ -49,6 +49,8 @@ export type ContextSelection = {
 	mode: ContextSelectionMode;
 	cutState: ContextCutSnapshot | undefined;
 	cutFallbackReason?: ContextCutFallbackReason;
+	/** Whether this call moved the stateful cut frontier, so a requested rotation can report its outcome. */
+	advanced: boolean;
 };
 
 export type ContextSelectionErrorCode =
@@ -573,7 +575,8 @@ export function selectContext(input: ContextSelectionInput): ContextSelection {
 	}
 	const initialTrigger = input.rotate ? Math.min(targetTokens, budgetTokens) : budgetTokens;
 	if (!input.cutState && calibrated(rawFullEstimate) <= initialTrigger) {
-		return { messages, estimatedTokens: reported(rawFullEstimate), budgetTokens, mode: "within-budget", cutState: undefined };
+		return { messages, estimatedTokens: reported(rawFullEstimate), budgetTokens, mode: "within-budget", cutState: undefined,
+			advanced: false };
 	}
 	const history = new SelectionHistoryLookup(input.rawHistoryItems);
 	const rawView = selectionView(grouped);
@@ -611,7 +614,8 @@ export function selectContext(input: ContextSelectionInput): ContextSelection {
 			const replacementDelta = replacement && protectedExchange
 				? unitEstimate(replacement.messages, cache) - unitEstimate(protectedExchange.messages, cache) : 0;
 			const estimate = retained + replacementDelta + (outgoingNotice ? messageEstimate(outgoingNotice, cache) : 0);
-			return { selection: { messages: viewMessages(view, count, outgoingNotice, replacement), estimatedTokens: reported(estimate), budgetTokens, mode, cutState: undefined },
+			return { selection: { messages: viewMessages(view, count, outgoingNotice, replacement), estimatedTokens: reported(estimate), budgetTokens, mode, cutState: undefined,
+				advanced: false },
 				normalNotice: notice, removedCount: count, lastKeyed, lastWasKeyless, cutFailure };
 		};
 		// Early rotation applies only to stateful cuts so fallback never causes a one-turn stateless bounce.
@@ -695,7 +699,7 @@ export function selectContext(input: ContextSelectionInput): ContextSelection {
 		if (calibrated(boundary.rawEstimate + messageEstimate(boundary.notice, cache)) > budgetTokens) return fallback("keyless-snap-over-budget");
 		const snapshot = boundary.count === 0 ? remembered! : cutSnapshot(boundary.frontier, boundary.notice);
 		return { messages: viewMessages(view, boundary.count, snapshot.notice), estimatedTokens: reported(boundary.rawEstimate + messageEstimate(snapshot.notice, cache)),
-			budgetTokens, mode: "paged", cutState: snapshot };
+			budgetTokens, mode: "paged", cutState: snapshot, advanced: boundary.count !== 0 };
 	}
-	return { ...result.selection, cutState: cutSnapshot(boundary.frontier, boundary.notice) };
+	return { ...result.selection, cutState: cutSnapshot(boundary.frontier, boundary.notice), advanced: true };
 }

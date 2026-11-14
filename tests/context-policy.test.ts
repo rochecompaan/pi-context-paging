@@ -951,6 +951,17 @@ test("rotates early when above trimToTokens within tokenBudget and keeps within-
 	assert.ok(rotated.cutState);
 	assert.equal(hasMarker(rotated.messages, "ROTATE_A request"), false);
 	assert.match(marker(rotated.messages[0]), /5,000-token rolling window/);
+	assert.equal(rotated.advanced, true);
+
+	// Rotating again when the kept context is already under the target leaves the cut alone.
+	const rotateAgain = selectContext({
+		messages: messages as any, systemPrompt: "", activeTools: [], modelContextWindow: 100_000,
+		tokenBudget: 5_000, trimToTokens: 1_500, rotate: true, cutState: rotated.cutState, rawHistoryItems,
+	});
+	assert.equal(rotateAgain.mode, "paged");
+	assert.equal(rotateAgain.cutState, rotated.cutState);
+	assert.deepEqual(rotateAgain.messages, rotated.messages);
+	assert.equal(rotateAgain.advanced, false);
 
 	const nextTurn = selectContext({
 		messages: messages as any, systemPrompt: "", activeTools: [], modelContextWindow: 100_000,
@@ -965,6 +976,7 @@ test("rotates early when above trimToTokens within tokenBudget and keeps within-
 	});
 	assert.equal(alreadyBelow.mode, "within-budget");
 	assert.equal(alreadyBelow.cutState, undefined);
+	assert.equal(alreadyBelow.advanced, false);
 
 	const activeLargerThanTrim = selectContext({
 		messages: [user(`ACTIVE_BIG ${"x".repeat(8_000)}`)] as any, systemPrompt: "", activeTools: [],

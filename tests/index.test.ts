@@ -905,6 +905,57 @@ test("context-paging rotate advances the cut on the next request and supports an
 	assert.equal(hasMarker(deeper.messages, "RESET_C request"), false);
 });
 
+test("context-paging rotate reports its outcome and keeps a rotation queued across an aborted selection", async () => {
+	const { harness, messages } = resetFixture();
+	harness.ctx.getSystemPrompt = () => "system";
+	await runPagingCommand(harness, "rotate");
+
+	// A resident prompt over budget throws RESIDENT_INPUT_TOO_LARGE, so the provider call is aborted.
+	harness.ctx.getSystemPrompt = () => "s".repeat(20_000);
+	await emit(harness, "context", { messages });
+	assert.equal(harness.abortCalls(), 1);
+	assert.match(harness.notifications.at(-1)!.message, /aborted this provider call/);
+
+	harness.ctx.getSystemPrompt = () => "system";
+	const retried = await emit(harness, "context", { messages }) as any;
+	assert.equal(hasMarker(retried.messages, "RESET_A request"), false);
+	assert.equal(harness.notifications.at(-1)!.level, "info");
+	assert.match(harness.notifications.at(-1)!.message, /rotated to [\d,]+ tokens/);
+
+	// The rotation was consumed by the successful selection, so later requests neither rotate nor notify.
+	const notified = harness.notifications.length;
+	const subsequent = await emit(harness, "context", { messages }) as any;
+	assert.deepEqual(subsequent.messages, retried.messages);
+	assert.equal(harness.notifications.length, notified);
+
+	await runPagingCommand(harness, "rotate");
+	const unchanged = await emit(harness, "context", { messages }) as any;
+	assert.deepEqual(unchanged.messages, retried.messages);
+	assert.equal(harness.notifications.at(-1)!.level, "warning");
+	assert.match(harness.notifications.at(-1)!.message, /skipped the rotation: context is already below/);
+});
+
+test("context-paging rotate rejects targets at or above the budget and shows the model-scaled target", async () => {
+	const { harness, messages } = resetFixture();
+	harness.ctx.getSystemPrompt = () => "system";
+	for (const args of ["rotate 1000", "rotate 999999"]) {
+		await runPagingCommand(harness, args);
+		assert.equal(harness.notifications.at(-1)!.level, "warning");
+		assert.match(harness.notifications.at(-1)!.message, /below the 1,000-token budget/);
+	}
+	const unrotated = await emit(harness, "context", { messages }) as any;
+	assert.equal(hasMarker(unrotated.messages, "RESET_A request"), true);
+
+	harness.ctx.model.contextWindow = 500;
+	await runPagingCommand(harness, "rotate");
+	assert.match(harness.notifications.at(-1)!.message, /rotate to 312 tokens/);
+
+	harness.ctx.model.contextWindow = -1;
+	await runPagingCommand(harness, "rotate");
+	assert.equal(harness.notifications.at(-1)!.level, "warning");
+	assert.match(harness.notifications.at(-1)!.message, /cannot rotate: .*context-window estimate is invalid/);
+});
+
 test("context-paging rotate rejects disabled sessions, bad targets, and clears across state resets", async () => {
 	const disabled = resetFixture(false);
 	disabled.harness.ctx.getSystemPrompt = () => "system";
