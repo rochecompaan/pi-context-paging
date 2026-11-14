@@ -146,6 +146,7 @@ route(request, ctx) {
 ```
 
 The extension uses the reported model's context window for that one request.
+Send the report from `route()` only. The extension ignores a report sent at any other time, and drops it if the request fails before paging runs.
 A switch to another routed model resets the cut, as a model switch does.
 If the reported model is not a physical model in the registry, or its window is invalid, the extension aborts the request.
 The extension ignores payloads with another `version`.

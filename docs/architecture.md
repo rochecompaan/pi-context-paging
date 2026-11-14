@@ -103,7 +103,11 @@ The effective budget is the smaller of the configured budget and model window, w
 For a physical model, it is the model's own window.
 For a virtual model, Pi exposes only the selection, not the routed model.
 A router can report the routed model from `route()` on the `context-paging:route` event channel, with `{ version: 1, provider, id }`.
-The extension keeps the newest report and uses it in the next `context` event only, even when paging is off.
+A report belongs to one request. Pi emits `turn_start` before every request, then calls `route()`, then the `context` event, and awaits each step.
+`turn_start` opens a request for the current selection. The extension keeps the newest report made while a request is open.
+The `context` event takes the report and closes the request, even when paging is off. It ignores a report made under a different selection.
+A request that ends before the `context` event, such as a failed route, ends with an assistant `message_end` and `agent_end`; both close the request.
+`model_select`, `session_start`, `session_tree`, and `session_shutdown` also close it. A report made while no request is open is ignored.
 It reads the window from `ctx.modelRegistry`. A model that is missing, or virtual, aborts the provider call; an invalid physical window fails the existing validation.
 Without a report, the virtual model's declared window applies. Pi reports an unset window as `0`, which the extension treats as unknown, so the configured budget applies.
 The effective target is `max(1, floor(trimToTokens * effectiveBudget / tokenBudget))`.
