@@ -7,15 +7,72 @@ export type MessageCosts = {
 	estimate?: number;
 };
 
+type KeyedCosts = MessageCosts & { readonly signature: string };
+
+/** Characters taken from each end of every string; bounds the signature cost per string. */
+const SIGNATURE_SAMPLE = 32;
+
+function mix(hash: number, value: number): number {
+	return Math.imul(hash ^ value, 0x01000193) >>> 0;
+}
+
+function mixString(hash: number, value: string): number {
+	hash = mix(hash, value.length);
+	const head = Math.min(value.length, SIGNATURE_SAMPLE);
+	for (let index = 0; index < head; index++) hash = mix(hash, value.charCodeAt(index));
+	for (let index = Math.max(head, value.length - SIGNATURE_SAMPLE); index < value.length; index++) {
+		hash = mix(hash, value.charCodeAt(index));
+	}
+	return hash;
+}
+
 /**
- * Cross-request cost cache for journal-backed messages. Entry content is immutable once
- * appended, so an entry-derived key addresses stable costs until an edit entry invalidates
- * them (see the extension's paging-state reset). Transient messages fall back to a WeakMap,
- * which serves a single request's fresh objects.
+ * A cheap content check for keyed costs. It hashes the message's shape, every key, every
+ * string's length, and the ends of every string, so its cost grows with the number of
+ * values, not their size. It catches a message rewritten under the same key, such as a
+ * recovered tool result or another extension's `context` rewrite. Only a same-shaped edit
+ * that keeps every string's length and ends unchanged would go unnoticed.
+ */
+export function contentSignature(value: unknown): string {
+	let nodes = 0;
+	let characters = 0;
+	const walk = (current: unknown, hash: number): number => {
+		nodes++;
+		if (typeof current === "string") {
+			characters += current.length;
+			return mixString(mix(hash, 1), current);
+		}
+		if (Array.isArray(current)) {
+			hash = mix(mix(hash, 2), current.length);
+			for (const item of current) hash = walk(item, hash);
+			return hash;
+		}
+		if (typeof current === "object" && current !== null) {
+			hash = mix(hash, 3);
+			for (const key in current) {
+				if (Object.hasOwn(current, key)) hash = walk((current as Record<string, unknown>)[key], mixString(hash, key));
+			}
+			return hash;
+		}
+		return mixString(mix(hash, 4), `${typeof current}:${String(current)}`);
+	};
+	const hash = walk(value, 0x811c9dc5);
+	return `${nodes}:${characters}:${hash.toString(36)}`;
+}
+
+/**
+ * Cross-request cost cache for journal-backed messages. Pi clones the outgoing messages for
+ * every `context` hook, so identity alone never matches across requests. An entry-derived key
+ * addresses stable costs until an edit entry invalidates them (see the extension's paging-state
+ * reset). Each keyed entry also stores a content signature: a message rewritten under the same
+ * key falls back to the per-object WeakMap and leaves the journal message's costs intact.
+ *
+ * Keyed entries keep each journal message's fingerprint until the paging state resets, so memory
+ * grows with the session, roughly by the serialized size of the messages that were measured.
  */
 export class MessageCostCache {
-	private readonly byKey = new Map<string, MessageCosts>();
-	private readonly byObject = new WeakMap<object, MessageCosts>();
+	private readonly byKey = new Map<string, KeyedCosts>();
+	private byObject = new WeakMap<object, MessageCosts>();
 
 	fingerprint(message: object, key: string | undefined, compute: () => string): string {
 		const costs = this.costsFor(message, key);
@@ -35,19 +92,27 @@ export class MessageCostCache {
 
 	clear(): void {
 		this.byKey.clear();
+		this.byObject = new WeakMap();
 	}
 
 	private costsFor(message: object, key: string | undefined): MessageCosts {
-		if (key !== undefined) {
-			const keyed = this.byKey.get(key);
-			if (keyed) return keyed;
-			const created: MessageCosts = {};
-			this.byKey.set(key, created);
-			this.byObject.set(message, created);
-			return created;
-		}
 		const byObject = this.byObject.get(message);
 		if (byObject) return byObject;
+		if (key !== undefined) {
+			const signature = contentSignature(message);
+			const keyed = this.byKey.get(key);
+			if (keyed?.signature === signature) {
+				this.byObject.set(message, keyed);
+				return keyed;
+			}
+			if (!keyed) {
+				const created: KeyedCosts = { signature };
+				this.byKey.set(key, created);
+				this.byObject.set(message, created);
+				return created;
+			}
+			// Rewritten under a journal key: cost this object alone and keep the journal's entry.
+		}
 		const created: MessageCosts = {};
 		this.byObject.set(message, created);
 		return created;

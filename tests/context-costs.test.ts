@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { AssistantMessage, ToolResultMessage, UserMessage } from "@earendil-works/pi-ai";
 import { historyItemKeyResolver, MessageCostCache } from "../src/context-costs.ts";
+import { ContextUsageTracker } from "../src/context-usage.ts";
 import type { HistoryItem } from "../src/history.ts";
 
 const timestamp = 1;
@@ -65,4 +66,34 @@ test("the resolver binds assistant and tool-result messages to entry-derived key
 	assert.equal(keyFor(result("call-1b")), "turn-1#call-1b");
 	assert.equal(keyFor(items[0]!.kind === "user" ? items[0]!.userMessage : result("x")), undefined);
 	assert.equal(keyFor(assistant(["call-unknown"])), undefined);
+});
+
+test("a message rewritten under a journal key gets its own costs and leaves the journal's intact", () => {
+	const cache = new MessageCostCache();
+	const journal = result("call-1");
+	const rewritten: ToolResultMessage = { ...result("call-1"), content: [{ type: "text", text: "short replacement" }] };
+	let estimates = 0;
+	const estimate = (value: number) => () => { estimates++; return value; };
+	assert.equal(cache.estimate(journal, "turn-1#call-1", estimate(100_000)), 100_000);
+	assert.equal(cache.estimate(rewritten, "turn-1#call-1", estimate(15)), 15);
+	assert.equal(estimates, 2);
+	// A fresh clone of the journal message still reuses the keyed cost.
+	assert.equal(cache.estimate(structuredClone(journal), "turn-1#call-1", estimate(-1)), 100_000);
+	assert.equal(estimates, 2);
+});
+
+test("a recovered tool result is not treated as its persistent original", () => {
+	const turn = modelTurn("turn-1", ["call-1"]);
+	assert.equal(turn.kind, "modelTurn");
+	if (turn.kind !== "modelTurn") return;
+	turn.toolResults[0] = { ...turn.toolResults[0]!, content: [{ type: "text", text: "x".repeat(400_000) }] };
+	const persistent = [structuredClone(turn.assistantMessage), structuredClone(turn.toolResults[0]!)];
+	const tracker = new ContextUsageTracker(new MessageCostCache());
+	tracker.bindKeys(historyItemKeyResolver([turn]));
+
+	// Pi clones messages for every context hook; the original still matches its journal entry.
+	assert.deepEqual(tracker.outgoingOnly(structuredClone(persistent), persistent), [false, false]);
+	const recovered: ToolResultMessage = { ...structuredClone(turn.toolResults[0]!),
+		content: [{ type: "text", text: "Read the exact stored result with read_context_output(...)." }] };
+	assert.deepEqual(tracker.outgoingOnly([structuredClone(persistent[0]!), recovered], persistent), [false, true]);
 });
