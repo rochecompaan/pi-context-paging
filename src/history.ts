@@ -223,17 +223,23 @@ export type ProjectionWatermark = {
 	readonly entryIndex: number;
 	/** Id of the last consumed raw entry at entryIndex - 1; undefined only when entryIndex is 0. */
 	readonly lastEntryId: string | undefined;
+	/** The restore classification the items were projected with; callers replace the set only on restore. */
+	readonly interruptedEntryIds: ReadonlySet<string> | undefined;
 };
 
 export type IncrementalProjection = { items: HistoryItem[]; watermark: ProjectionWatermark };
 
-function coldWatermark(detailed: DetailedProjection, entries: readonly SessionEntry[]): IncrementalProjection {
+function coldWatermark(
+	detailed: DetailedProjection,
+	entries: readonly SessionEntry[],
+	interruptedEntryIds: ReadonlySet<string> | undefined,
+): IncrementalProjection {
 	const entryIndex = detailed.throughEntryIndexes.length === 0
 		? 0
 		: detailed.throughEntryIndexes[detailed.throughEntryIndexes.length - 1]!;
 	return {
 		items: detailed.items,
-		watermark: { items: detailed.items, entryIndex, lastEntryId: entries[entryIndex - 1]?.id },
+		watermark: { items: detailed.items, entryIndex, lastEntryId: entries[entryIndex - 1]?.id, interruptedEntryIds },
 	};
 }
 
@@ -243,15 +249,17 @@ export function projectActiveBranchIncremental(
 	previous?: ProjectionWatermark,
 	options: HistoryProjectionOptions = {},
 ): IncrementalProjection {
-	if (!previous || options.recoverIncomplete || options.interruptedEntryIds) {
-		return coldWatermark(projectDetailed(entries, options), entries);
+	// A restore or a new interrupted set can reclassify items in the prefix. Callers replace the set
+	// rather than mutate it, so comparing references detects the change.
+	if (!previous || options.recoverIncomplete || previous.interruptedEntryIds !== options.interruptedEntryIds) {
+		return coldWatermark(projectDetailed(entries, options), entries, options.interruptedEntryIds);
 	}
 	// Anchoring on the last consumed entry keeps appends incremental and still catches a branch switch.
 	const anchored = previous.entryIndex === 0
 		? previous.lastEntryId === undefined
 		: previous.entryIndex <= entries.length && entries[previous.entryIndex - 1]!.id === previous.lastEntryId;
 	if (!anchored) {
-		return coldWatermark(projectDetailed(entries, options), entries);
+		return coldWatermark(projectDetailed(entries, options), entries, options.interruptedEntryIds);
 	}
 	if (previous.entryIndex === entries.length) {
 		return { items: [...previous.items], watermark: previous };
@@ -263,7 +271,8 @@ export function projectActiveBranchIncremental(
 		: previous.entryIndex + tail.throughEntryIndexes[tail.throughEntryIndexes.length - 1]!;
 	return {
 		items,
-		watermark: tail.items.length === 0 ? previous : { items, entryIndex: through, lastEntryId: entries[through - 1]?.id },
+		watermark: tail.items.length === 0 ? previous
+			: { items, entryIndex: through, lastEntryId: entries[through - 1]?.id, interruptedEntryIds: options.interruptedEntryIds },
 	};
 }
 

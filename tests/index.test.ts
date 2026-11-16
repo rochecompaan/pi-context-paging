@@ -1483,3 +1483,25 @@ test("a filtered remembered exchange clears fallback state and can rebuild the s
 	assert.equal(hasMarker(rebuilt.messages, "result-live-1 payload"), false);
 	assert.equal(harness.abortCalls(), 0);
 });
+
+test("reuses projected prefix items across context requests after a restore", async () => {
+	const harness = createHarness({ globalSettings: { contextPaging: { enabled: true } }, projectTrusted: false });
+	const first = user("PREFIX_AS_PROJECTED");
+	const reply = assistant("FIRST_REPLY");
+	harness.setBranch([entry("user-1", first), entry("assistant-1", reply)]);
+	await emit(harness, "session_start", { reason: "startup" });
+	await emit(harness, "context", { messages: [first, reply] });
+
+	// Same id with new text: a full rebuild would project it, prefix reuse keeps the earlier item.
+	const swapped = user("PREFIX_REBUILT");
+	const next = user("NEXT_REQUEST");
+	harness.setBranch([entry("user-1", swapped), entry("assistant-1", reply), entry("user-2", next)]);
+	await emit(harness, "context", { messages: [swapped, reply, next] });
+
+	const load = harness.tools.find((tool) => tool.name === "load_history");
+	const loaded = await load.execute("call", { historyIds: ["user-1", "user-2"] }, undefined, undefined, harness.ctx);
+	const text = loaded.content.map((block: any) => block.text).join("");
+	assert.match(text, /PREFIX_AS_PROJECTED/);
+	assert.doesNotMatch(text, /PREFIX_REBUILT/);
+	assert.match(text, /NEXT_REQUEST/, "appended entries are still projected");
+});

@@ -55,13 +55,24 @@ test("a watermark whose anchor entry no longer matches falls back to the cold pr
 	assert.deepEqual(switched.watermark.items, switched.items);
 });
 
-test("restore options always take the cold projection", () => {
+test("restore and a replaced interrupted set take the cold projection", () => {
 	const entries = [...baseBranch(), ...exchange("turn-3", ["call-3a"])];
 	const first = projectActiveBranchIncremental(baseBranch());
 	for (const options of [{ recoverIncomplete: true as const }, { interruptedEntryIds: new Set(["turn-1"]) }]) {
 		const restored = projectActiveBranchIncremental(entries, first.watermark, options);
 		assert.deepEqual(restored.items, projectActiveBranch(entries, options));
+		assert.notEqual(restored.items[0], first.items[0]);
 	}
+});
+
+test("an unchanged interrupted set keeps reusing the prefix", () => {
+	// The extension always passes a set, usually an empty one; that alone must not force a rebuild.
+	const interruptedEntryIds = new Set<string>();
+	const first = projectActiveBranchIncremental(baseBranch(), undefined, { interruptedEntryIds });
+	const entries = [...baseBranch(), ...exchange("turn-3", ["call-3a"])];
+	const second = projectActiveBranchIncremental(entries, first.watermark, { interruptedEntryIds });
+	assert.deepEqual(second.items, projectActiveBranch(entries, { interruptedEntryIds }));
+	assert.equal(second.items[0], first.items[0]);
 });
 
 test("an incomplete trailing exchange stays outside the watermark until its results arrive", () => {
