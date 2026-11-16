@@ -60,3 +60,34 @@ test("conversation records survive structuredClone like the rest of the snapshot
 	assert.ok(first.cutState);
 	assert.deepEqual(structuredClone(first.cutState), first.cutState);
 });
+
+test("seeded records render the same section as a cold rebuild at every boundary", async () => {
+	const { EvictedConversation } = await import("../src/paging-notice.ts");
+	const ids = new Map<object, string>();
+	const history = { recoveryHistoryId: (message: object) => ids.get(message) };
+	// Many short requests: far more than a section showed under the old fixed cap.
+	const turns = Array.from({ length: 1_000 }, (_, turn) => {
+		const request = { role: "user" as const, content: `r${turn}`, timestamp: 0 };
+		const reply = { role: "assistant" as const, content: [{ type: "text" as const, text: `a${turn}` }], timestamp: 0 } as any;
+		ids.set(request, `u${turn}`);
+		// One long id only on an old reply, which later drops out of the recent replies.
+		ids.set(reply, turn === 5 ? `reply-with-a-much-longer-history-id-${turn}` : `a${turn}`);
+		return [request, reply];
+	});
+	const cold = (count: number) => {
+		const conversation = new EvictedConversation(history);
+		for (const messages of turns.slice(0, count)) conversation.addTurn(messages);
+		return conversation;
+	};
+	const render = (conversation: InstanceType<typeof EvictedConversation>) =>
+		[32_000, 4_000].map((limit) => conversation.sectionLines(limit).join("\n"));
+
+	// Seed past the stored-request cap, keep evicting, and capture records behind the live turn count.
+	const seeded = EvictedConversation.fromRecords(cold(900).recordsAt(900), history);
+	for (const messages of turns.slice(900)) seeded.addTurn(messages);
+	for (const count of [900, 901, 950, 998, 1_000]) {
+		const rebuilt = EvictedConversation.fromRecords(seeded.recordsAt(count), history);
+		assert.deepEqual(render(rebuilt), render(cold(count)), `boundary ${count}`);
+	}
+	assert.match(render(cold(1_000))[0]!, /earlier user messages are/, "the section omits older requests");
+});

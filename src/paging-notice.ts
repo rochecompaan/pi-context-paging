@@ -19,8 +19,14 @@ type ConversationEntry = { kind: "user message" | "assistant reply"; historyId: 
 /** An entry from turn number `turn`, with its whole block formatted on first use. */
 export type RecordedEntry = { entry: ConversationEntry; turn: number; whole?: string };
 
-/** The most requests any notice section can render, so stored records stay bounded however far the cut advanced. */
-const MAXIMUM_STORED_REQUESTS = Math.ceil(SECTION_CHARACTERS / MINIMUM_CLIPPED_CHARACTERS);
+/** The smallest block that can render: a header with an empty id, a line break, and one character of text. */
+const MINIMUM_BLOCK_CHARACTERS = entryHeader({ kind: "user message", historyId: "", text: "", part: "" }).length + 2;
+/**
+ * Every shown block takes at least MINIMUM_BLOCK_CHARACTERS plus a two-character separator from the
+ * section's room, so no section shows more requests than this. Storing that many keeps a seeded
+ * notice identical to a cold rebuild while the stored records stay bounded.
+ */
+const MAXIMUM_STORED_REQUESTS = Math.ceil((SECTION_CHARACTERS + 2) / (MINIMUM_BLOCK_CHARACTERS + 2)) + 1;
 
 /** Plain conversation records carried in a cut snapshot; rebuilds into an EvictedConversation on reuse. */
 export type ConversationRecords = {
@@ -99,12 +105,18 @@ function omittedLine(omitted: number, oldestShownId: string | undefined): string
  */
 export class EvictedConversation {
 	private readonly requests: RecordedEntry[] = [];
-	/** Replies of the newest RECENT_REPLY_TURNS turns only. */
+	/**
+	 * Replies recorded in this conversation, plus the seeded recent ones. Rendering shows only the
+	 * newest RECENT_REPLY_TURNS turns; the rest stay so recordsAt can match an earlier boundary.
+	 */
 	private readonly replies: RecordedEntry[] = [];
 	private readonly history: ConversationProvenance;
 	private turnCount = 0;
 	private totalRequests = 0;
 	private longestId = "";
+	/** Turns and longest id that came from seeded records rather than addTurn. */
+	private seededTurns = 0;
+	private seededLongestId = "";
 
 	constructor(history: ConversationProvenance) {
 		this.history = history;
@@ -114,17 +126,34 @@ export class EvictedConversation {
 		return this.turnCount;
 	}
 
-	/** Records at an earlier turn boundary; only plain data is kept, capped to the render horizon. */
+	/**
+	 * Records that rebuild exactly the conversation a cold rebuild would hold after `count` turns.
+	 * `count` must lie between the seeded turns and the recorded turns. Only plain data is kept,
+	 * capped to the requests a section can render.
+	 */
 	recordsAt(count: number): ConversationRecords {
-		const through: RecordedEntry[] = [];
-		for (const recorded of this.requests) if (recorded.turn < count) through.push(recorded);
-		const replies = this.replies.filter((recorded) => recorded.turn < count);
-		const requests = through.length > MAXIMUM_STORED_REQUESTS ? through.slice(through.length - MAXIMUM_STORED_REQUESTS) : through;
-		let longestId = "";
-		for (const recorded of [...requests, ...replies]) {
+		let newerRequests = 0;
+		while (newerRequests < this.requests.length && this.requests[this.requests.length - 1 - newerRequests]!.turn >= count) newerRequests++;
+		const through = this.requests.length - newerRequests;
+		const requests = this.requests.slice(Math.max(0, through - MAXIMUM_STORED_REQUESTS), through);
+		const replies = this.replies.filter((recorded) => recorded.turn < count && recorded.turn >= count - RECENT_REPLY_TURNS);
+		// Match addTurn: the first id of the greatest length wins, in turn order, request before reply.
+		let longestId = this.seededLongestId;
+		let request = this.requests.findIndex((recorded) => recorded.turn >= this.seededTurns);
+		let reply = this.replies.findIndex((recorded) => recorded.turn >= this.seededTurns);
+		if (request < 0) request = this.requests.length;
+		if (reply < 0) reply = this.replies.length;
+		while (true) {
+			const nextRequest = request < through ? this.requests[request] : undefined;
+			const nextReply = reply < this.replies.length && this.replies[reply]!.turn < count ? this.replies[reply] : undefined;
+			if (!nextRequest && !nextReply) break;
+			const takeRequest = nextRequest !== undefined && (nextReply === undefined || nextRequest.turn <= nextReply.turn);
+			const recorded = takeRequest ? nextRequest : nextReply!;
+			if (takeRequest) request++;
+			else reply++;
 			if (recorded.entry.historyId.length > longestId.length) longestId = recorded.entry.historyId;
 		}
-		return { evictedTurns: count, totalRequests: through.length, longestId, requests, replies };
+		return { evictedTurns: count, totalRequests: this.totalRequests - newerRequests, longestId, requests, replies };
 	}
 
 	/** Shared record objects memoize their rendered block lazily; the memo is a deterministic idempotent string. */
@@ -135,6 +164,8 @@ export class EvictedConversation {
 		rebuilt.turnCount = records.evictedTurns;
 		rebuilt.totalRequests = records.totalRequests;
 		rebuilt.longestId = records.longestId;
+		rebuilt.seededTurns = records.evictedTurns;
+		rebuilt.seededLongestId = records.longestId;
 		return rebuilt;
 	}
 
@@ -152,7 +183,6 @@ export class EvictedConversation {
 			this.totalRequests++;
 		}
 		if (reply) this.replies.push({ entry: reply, turn });
-		while (this.replies[0] && this.replies[0].turn < this.turnCount - RECENT_REPLY_TURNS) this.replies.shift();
 		for (const entry of [request, reply]) {
 			if (entry && entry.historyId.length > this.longestId.length) this.longestId = entry.historyId;
 		}
@@ -161,10 +191,12 @@ export class EvictedConversation {
 
 	/** Recorded entries newest first; a reply follows its own turn's request. */
 	private *newestFirst(): Generator<RecordedEntry> {
+		const oldestReplyTurn = this.turnCount - RECENT_REPLY_TURNS;
 		let request = this.requests.length - 1;
 		let reply = this.replies.length - 1;
-		while (request >= 0 || reply >= 0) {
-			const replyIsNewer = reply >= 0 && (request < 0 || this.replies[reply]!.turn >= this.requests[request]!.turn);
+		const replyShown = () => reply >= 0 && this.replies[reply]!.turn >= oldestReplyTurn;
+		while (request >= 0 || replyShown()) {
+			const replyIsNewer = replyShown() && (request < 0 || this.replies[reply]!.turn >= this.requests[request]!.turn);
 			yield replyIsNewer ? this.replies[reply--]! : this.requests[request--]!;
 		}
 	}
