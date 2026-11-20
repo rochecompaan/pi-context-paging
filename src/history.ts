@@ -8,8 +8,6 @@ export const PAGING_TOOL_NAMES = [
 	"read_context_output",
 ] as const;
 
-export type PagingToolName = typeof PAGING_TOOL_NAMES[number];
-
 export type HistoryMetadata = {
 	tools: string[];
 	files: string[];

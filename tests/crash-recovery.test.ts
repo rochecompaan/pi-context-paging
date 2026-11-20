@@ -46,6 +46,7 @@ function harness(manager = SessionManager.inMemory()) {
 	};
 	contextPagingExtension({
 		on: (name: string, handler: any) => handlers.set(name, handler),
+		events: { on: () => () => {} },
 		registerTool: (tool: any) => tools.push(tool),
 		registerCommand: (name: string, command: any) => commands.set(name, command),
 		getAllTools: () => [], getActiveTools: () => [],

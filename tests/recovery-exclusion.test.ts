@@ -8,6 +8,7 @@ import { PAGING_TOOL_NAMES, projectActiveBranch, type HistoryItem } from "../src
 import { HistoryNavigator } from "../src/navigator.ts";
 import { readContextOutput } from "../src/output-pages.ts";
 import { registerContextPagingTools } from "../src/tools.ts";
+import { toolCallContext } from "./fixtures/tool-context.ts";
 
 const usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
 	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
@@ -46,7 +47,7 @@ function registered(items: readonly HistoryItem[]) {
 	});
 	return async (name: string, params: unknown) => {
 		const tool = tools.find((candidate) => candidate.name === name)!;
-		return tool.execute("test-call", params, undefined, undefined, {} as ExtensionContext);
+		return tool.execute("test-call", params, undefined, undefined, toolCallContext({}));
 	};
 }
 
@@ -244,15 +245,15 @@ test("live navigation notices ordinary work added in a mixed paging turn", async
 	let branch = [entry("active-user", user())];
 	const tools: ToolDefinition<any, any, any>[] = [];
 	const pi = {
-		on() {}, registerCommand() {}, registerTool(tool: ToolDefinition<any, any, any>) { tools.push(tool); },
+		on() {}, events: { on: () => () => {} }, registerCommand() {}, registerTool(tool: ToolDefinition<any, any, any>) { tools.push(tool); },
 	};
 	contextPagingExtension(pi as unknown as ExtensionAPI, { globalSettings: {}, projectTrusted: false });
 	const ctx = { sessionManager: { getBranch: () => branch, buildSessionProjection: () => ({
 		messages: branch.flatMap((item) => item.type === "message" ? [item.message] : []),
 	}) } } as unknown as ExtensionContext;
 	const search = tools.find((tool) => tool.name === "search_history")!;
-	await search.execute("first-call", { query: "Continue" }, undefined, undefined, ctx);
+	await search.execute("first-call", { query: "Continue" }, undefined, undefined, toolCallContext(ctx));
 	branch = [...branch, ...mixedEntries("search_history")];
-	const found = await search.execute("next-call", { query: "ordinary-result" }, undefined, undefined, ctx);
+	const found = await search.execute("next-call", { query: "ordinary-result" }, undefined, undefined, toolCallContext(ctx));
 	assert.deepEqual(JSON.parse((found.content[0] as { text: string }).text).references.map((reference: { historyId: string }) => reference.historyId), ["mixed"]);
 });

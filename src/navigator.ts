@@ -1,10 +1,12 @@
 import type { HistoryItem } from "./history.ts";
 import { recoveryHistoryItem, type RecoveryHistoryItem } from "./recovery-content.ts";
-import { isRecoveryImage } from "./recovery-parts.ts";
+import { clipToCodeUnits, isRecoveryImage } from "./recovery-parts.ts";
 
 const K1 = 1.2;
 const B = 0.75;
 const TERM_PATTERN = /\p{Script=Han}|[\p{L}\p{N}_./:-]+/gu;
+/** Both preview shapes share this budget, so a reference and a match excerpt stay the same size. */
+const MAXIMUM_PREVIEW_CHARACTERS = 160;
 
 export type HistorySearchInput = {
 	query: string;
@@ -102,9 +104,10 @@ function itemText(item: RecoveryHistoryItem): string {
 	].join(" ");
 }
 
+/** Previews are the shortest recovery hint, so they must never emit half of a surrogate pair. */
 function previewFor(item: RecoveryHistoryItem): string {
 	const content = item.kind === "user" ? item.userMessage.content : item.assistantMessage.content;
-	return contentText(content).replace(/\s+/g, " ").trim().slice(0, 160);
+	return clipToCodeUnits(contentText(content).replace(/\s+/g, " ").trim(), MAXIMUM_PREVIEW_CHARACTERS);
 }
 
 // Lowercasing can expand characters, such as İ, so folded offsets are not always source offsets.
@@ -123,7 +126,7 @@ function originalRange(text: string, start: number, end: number): [number, numbe
 }
 
 function excerptAround(text: string, matchStart: number, matchEnd: number): string {
-	const maximum = 160;
+	const maximum = MAXIMUM_PREVIEW_CHARACTERS;
 	if (text.length <= maximum) return text;
 	const width = maximum - 2; // Reserve space for both ellipses.
 	const before = Math.max(0, Math.floor((width - (matchEnd - matchStart)) / 2));

@@ -27,3 +27,38 @@ jobs:
 
       - name: Check package
         run: npm run check
+
+      # Every gate above reads the source. The registry's copy of the version this repository advertises is a
+      # different build: the README pins an install command naming that version, and if the published tarball predates
+      # the peer floor and the capability guard, readers get a build that installs on hosts below the floor and dies on
+      # the first request that reads the session projection. This gate reads the registry; it cannot live in the
+      # offline publish hook (pinned in tests/host-compat-contract.test.ts).
+      - name: Check the published artifact carries this contract
+        run: node scripts/check-published-artifact.mjs
+  # The manifest declares a Pi floor (">=0.87.0" on the host peers), so users run this package on every Pi
+  # This job runs the same gates against the two hosts that define the supported range: the measured floor
+  # (COMPAT_FLOOR in scripts/check-host-compat.mjs) and the latest published host.
+  host-compat:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The floor host runs the runtime contract only (typecheck, packed artifact, host API probe): the
+          # recall-eval rig in tests/ resolves models through the newest host registry and cannot pass there.
+          - pi: floor
+            stages: --runtime-only
+          # Latest runs everything the pinned dev host runs, suite included.
+          - pi: latest
+            stages: ""
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+
+      - name: Check against Pi ${{ matrix.pi }}
+        run: node scripts/check-host-compat.mjs --host ${{ matrix.pi }} ${{ matrix.stages }}

@@ -42,16 +42,45 @@ jobs:
       - name: Check package
         run: npm run check
 
-      - name: Publish to npm when absent
+      # The checks above run against the dev host pinned in devDependencies, and `check:package` loads the packed
+      # artifact through that same host's CLI. The peer floor admits every Pi from COMPAT_FLOOR up, so users load this
+      # release on Pi versions the repository does not pin; a tag pushed from a release branch gets no host-compat
+      # coverage from CI, and a tag needs no green CI to be pushed. Verify the release against both ends of the
+      # advertised range here: the floor `peerDependencies` promises, and the latest published Pi.
+      - name: Check against the oldest supported Pi (the peer floor)
+        run: node scripts/check-host-compat.mjs --host floor --runtime-only
+
+      - name: Check against the latest published Pi
+        run: node scripts/check-host-compat.mjs
+
+      - name: Publish to npm when this tag's content is absent
+        env:
+          TAG_COMMIT: ${{ github.sha }}
         run: |
           set -euo pipefail
           package_name=$(node -p 'require("./package.json").name')
           package_version=$(node -p 'require("./package.json").version')
-          if npm view "$package_name@$package_version" version >/dev/null 2>&1; then
-            echo "$package_name@$package_version is already published"
-          else
+          published_version=$(npm view "$package_name@$package_version" version 2>/dev/null || true)
+          if [ -z "$published_version" ]; then
             npm publish --provenance --access public
+            exit 0
           fi
+          # npm records gitHead for a publish made from a git checkout, so it identifies the content behind a version
+          # number -- measured: 0.3.11's gitHead is exactly `git rev-list -n1 v0.3.11`. A version on the registry is
+          # therefore two different situations, and they used to print the same line and exit 0.
+          published_head=$(npm view "$package_name@$package_version" gitHead 2>/dev/null || true)
+          if [ "$published_head" = "$TAG_COMMIT" ]; then
+            # A re-run after a later step failed: this content is out, finish the release step below.
+            echo "$package_name@$package_version is published from $published_head, which is this tag: nothing to publish"
+            exit 0
+          fi
+          {
+            echo "::error::$package_name@$package_version is already published from commit ${published_head:-unknown}, and this tag is $TAG_COMMIT."
+            echo "npm cannot publish over an existing version, so this tag's content cannot be released under this number."
+            echo "Continuing would create a GitHub release for $GITHUB_REF_NAME whose npm artifact does not exist, and a green job."
+            echo "Fix: bump version in package.json (the release-metadata check keeps README and CHANGELOG in step) and tag the new version."
+          } >&2
+          exit 1
 
       - name: Create GitHub release when absent
         env:

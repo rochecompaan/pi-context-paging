@@ -133,3 +133,21 @@ test("query-specific previews preserve browse references, empty queries, and exa
 	assert.deepEqual(navigator.load(["turn"]), loaded);
 	assert.equal(navigator.search({ query: "needle" })[0].preview, first.preview);
 });
+
+test("previews never split a surrogate pair in reference previews or match excerpts", () => {
+	// The astral character straddles the clip boundary: high surrogate at code unit 159, low surrogate at 160.
+	const text = `needle ${"x".repeat(152)}\u{1F600} tail`;
+	for (const item of [user(text), turn([{ type: "text", text }])]) {
+		for (const [shape, references] of [
+			["reference", new HistoryNavigator([item]).browse({ direction: "forward", count: 1 })],
+			["excerpt", new HistoryNavigator([item]).search({ query: "needle" })],
+		] as const) {
+			const preview = references[0].preview;
+			assert.ok(preview.length <= 160, `${shape} preview is ${preview.length} code units`);
+			assert.ok(!/[\uD800-\uDBFF]$/u.test(preview), `${shape} preview ends with a lone high surrogate`);
+			assert.ok(!/^[\uDC00-\uDFFF]/u.test(preview), `${shape} preview starts with a lone low surrogate`);
+			// The reply is JSON, so a half pair reaches the model as a \udXXX escape.
+			assert.equal(/\\ud[89ab][0-9a-f]{2}/i.test(JSON.stringify(preview)), false, `${shape} preview JSON-escapes a lone surrogate`);
+		}
+	}
+});

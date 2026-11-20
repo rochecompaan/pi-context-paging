@@ -4,6 +4,7 @@ import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-w
 import type { HistoryItem } from "../src/history.ts";
 import { HistoryNavigator } from "../src/navigator.ts";
 import { registerContextPagingTools } from "../src/tools.ts";
+import { toolCallContext } from "./fixtures/tool-context.ts";
 
 type RegisteredTool = ToolDefinition<any, any, any>;
 
@@ -60,7 +61,7 @@ function tool(tools: readonly RegisteredTool[], name: string): RegisteredTool {
 }
 
 async function execute(registeredTool: RegisteredTool, params: unknown) {
-	return registeredTool.execute("call-1", params, undefined, undefined, {} as ExtensionContext);
+	return registeredTool.execute("call-1", params, undefined, undefined, toolCallContext({}));
 }
 
 /** Recovery replies keep their payload in content; details no longer copies it. */

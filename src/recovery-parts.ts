@@ -32,13 +32,20 @@ const escapeKey = (key: string) => key.replace(/~/g, "~0").replace(/\//g, "~1");
 // Real tool call IDs reach 92 characters, so a clipped choice stays usable.
 const MAXIMUM_CHOICE_CHARACTERS = 160;
 const MAXIMUM_CHOICES_BYTES = 1_536;
+/** Previews are clipped to this many code units, like the navigator's own previews. */
+const MAXIMUM_PREVIEW_CHARACTERS = 160;
+
+/** Shorten text to at most `limit` code units, dropping a leading half of a surrogate pair. */
+export function clipToCodeUnits(value: string, limit: number): string {
+	if (value.length <= limit) return value;
+	const end = /[\uD800-\uDBFF]/u.test(value[limit - 1]) ? limit - 1 : limit;
+	return value.slice(0, end);
+}
 
 /** Shorten a value echoed in an error without splitting a surrogate pair. */
 export function clipValue(value: string): string {
 	if (value.length <= MAXIMUM_CHOICE_CHARACTERS) return value;
-	let end = MAXIMUM_CHOICE_CHARACTERS - 1;
-	if (/[\uD800-\uDBFF]/u.test(value[end - 1])) end--;
-	return `${value.slice(0, end)}…`;
+	return `${clipToCodeUnits(value, MAXIMUM_CHOICE_CHARACTERS - 1)}…`;
 }
 
 /** Keep error messages small when an item has many or long parts or results. */
@@ -155,7 +162,7 @@ export function describeHistoryPart(item: RecoveryHistoryItem, part: HistoryPart
 		part: part.part,
 		type,
 		bytes: Buffer.byteLength(text, "utf8"),
-		preview: text.slice(0, 160).replace(/[\uD800-\uDBFF]$/u, ""),
+		preview: clipToCodeUnits(text, MAXIMUM_PREVIEW_CHARACTERS),
 		read: { historyId: item.id, part: part.part },
 	};
 }

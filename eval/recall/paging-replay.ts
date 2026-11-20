@@ -16,6 +16,31 @@ export type PagingReplay = {
 	restore(session: AgentSession, tape: PagingReplayTape): Promise<RestorationEvidence>;
 };
 type Handler = (event: any, ctx: ExtensionContext) => unknown;
+
+/**
+ * Mirrors `tests/fixtures/tool-context.ts`: the members current Pi (1.5+) gives a tool handler beyond the
+ * extension context. The eval harness keeps its own copy because `eval/` does not import from `tests/`; the
+ * compiler binds both to the installed host, so a host-side rename fails the gate on every supported Pi.
+ */
+type ToolCallContext = ExtensionContext & {
+	readonly tools: readonly never[];
+	executeTool(name: string, args: unknown): Promise<never>;
+};
+
+function withToolContext(ctx: ExtensionContext): ToolCallContext {
+	// Defined on the observed context and returned as the same object: the tape records the context object it
+	// observes, and a copy loses the bound methods and getters the tool call depends on.
+	const extras: Record<string, unknown> = { tools: [], executeTool: async () => { throw new Error("replay does not run nested tools"); } };
+	for (const [key, value] of Object.entries(extras)) {
+		// Only members the context lacks. A current Pi hands the tool handler its own `tools`/`executeTool`,
+		// non-configurably, and redefining one throws inside the observed call — which the tape would then
+		// report as an incomplete lifecycle instead of the real failure.
+		if (key in ctx) continue;
+		Object.defineProperty(ctx, key, { value, enumerable: false, configurable: true, writable: true });
+	}
+	return ctx as ToolCallContext;
+}
+
 type ResidentInputs = {
 	model: ExtensionContext["model"];
 	systemPrompt: string;
@@ -43,6 +68,7 @@ export function createPagingReplay(settings: ContextPagingSettingsSources): Pagi
 	let restoring = false;
 	let attached = false;
 	let captureFailure = false;
+	let captureCause: unknown;
 	const capturedSettings = copyPrivate(settings);
 
 	async function observe(kind: Observation["kind"], name: string, event: unknown, ctx: ExtensionContext, invoke: Handler) {
@@ -60,7 +86,7 @@ export function createPagingReplay(settings: ContextPagingSettingsSources): Pagi
 			observation.output = copyPrivate(output);
 			observations.push(observation);
 			return output;
-		} catch (error) { captureFailure = true; throw error; }
+		} catch (error) { captureFailure = true; captureCause = error; throw error; }
 		finally { activeApi = undefined; }
 	}
 	let realApi: ExtensionAPI | undefined;
@@ -79,7 +105,7 @@ export function createPagingReplay(settings: ContextPagingSettingsSources): Pagi
 					tools.set(tool.name, tool);
 					pi.registerTool({ ...tool, execute: (id, args, signal, update, ctx) =>
 						observe("tool", tool.name, { id, args, signal }, ctx,
-							(event, host) => tool.execute(event.id, event.args, event.signal, update, host)) as any });
+							(event, host) => tool.execute(event.id, event.args, event.signal, update, withToolContext(host))) as any });
 				};
 				if (property === "getActiveTools" || property === "getAllTools") {
 					const api = activeApi ?? target;
@@ -94,7 +120,13 @@ export function createPagingReplay(settings: ContextPagingSettingsSources): Pagi
 	return {
 		factory,
 		freeze() {
-			if (!attached || captureFailure || activeApi || restoring) throw new Error("Incomplete paging lifecycle tape");
+			if (!attached || captureFailure || activeApi || restoring) {
+				// The lifecycle flags say the tape is unusable; the captured error says why, and without it every
+				// handler failure reads as the same opaque tape problem.
+				const cause = captureCause instanceof Error ? `${captureCause.name}: ${captureCause.message}` : String(captureCause);
+				throw new Error(`Incomplete paging lifecycle tape (attached=${attached}, captureFailure=${captureFailure}, ` +
+					`activeApi=${activeApi !== undefined}, restoring=${restoring}${captureFailure ? `; captured failure: ${cause}` : ""})`);
+			}
 			const tape = Object.freeze({ method: PAGING_RESTORATION_METHOD,
 				toJSON() { throw new Error("Private paging tape must not be serialized"); } });
 			tapes.set(tape, { settings: copyPrivate(capturedSettings), observations: copyPrivate(observations) });
@@ -131,7 +163,7 @@ export function createPagingReplay(settings: ContextPagingSettingsSources): Pagi
 						const tool = tools.get(observation.name);
 						check(`tool-present-${index}`, !!tool);
 						const call = event as { id: string; args: any; signal: AbortSignal | undefined };
-						output = await tool!.execute(call.id, call.args, call.signal, undefined, host.at<ExtensionContext>("ctx"));
+						output = await tool!.execute(call.id, call.args, call.signal, undefined, withToolContext(host.at<ExtensionContext>("ctx")));
 					}
 					host.assertConsumed();
 					check(`handler-output-match-${index}`, equalPrivate(output, observation.output));

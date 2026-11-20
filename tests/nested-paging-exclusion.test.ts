@@ -7,6 +7,7 @@ import { PAGING_TOOL_NAMES, projectActiveBranch, type HistoryItem } from "../src
 import { HistoryNavigator } from "../src/navigator.ts";
 import { readContextOutput } from "../src/output-pages.ts";
 import { registerContextPagingTools } from "../src/tools.ts";
+import { toolCallContext } from "./fixtures/tool-context.ts";
 
 const usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
 	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
@@ -54,7 +55,7 @@ function registered(items: readonly HistoryItem[]) {
 		snapshot: () => ({ allItems: items, navigator: new HistoryNavigator(items) }),
 	});
 	return (name: string, params: unknown) => tools.find((tool) => tool.name === name)!
-		.execute("test-call", params, undefined, undefined, {} as ExtensionContext);
+		.execute("test-call", params, undefined, undefined, toolCallContext({}));
 }
 
 for (const name of PAGING_TOOL_NAMES) {

@@ -16,7 +16,7 @@ import type { StageGroupOptions, StageGroupResult } from "./stage-group.ts";
 import type { EvalArm, Clock } from "./pi-arm.ts";
 import type { ArmFactoryOptions } from "./fork.ts";
 import type { Arm, Stage } from "./workload.ts";
-export { parseEvalArgs } from "./cli-options.ts";
+export { parseEvalArgs, EVAL_USAGE, isHelpRequest, evalFlags } from "./cli-options.ts";
 export type { EvalCliOptions } from "./cli-options.ts";
 
 export type LiveEval = {

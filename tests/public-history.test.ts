@@ -5,6 +5,7 @@ import { PAGING_TOOL_NAMES, type HistoryItem, type ModelTurnHistoryItem } from "
 import { HistoryNavigator } from "../src/navigator.ts";
 import { readContextOutput } from "../src/output-pages.ts";
 import { registerContextPagingTools } from "../src/tools.ts";
+import { toolCallContext } from "./fixtures/tool-context.ts";
 
 const publicText = "Public parser decision.\nExact line two.";
 const privateValues = [
@@ -76,7 +77,7 @@ function registered(items: readonly HistoryItem[]) {
 	return async (name: string, params: unknown) => {
 		const tool = tools.find((candidate) => candidate.name === name);
 		assert.ok(tool);
-		return tool.execute("fixture-call", params, undefined, undefined, {} as ExtensionContext);
+		return tool.execute("fixture-call", params, undefined, undefined, toolCallContext({}));
 	};
 }
 

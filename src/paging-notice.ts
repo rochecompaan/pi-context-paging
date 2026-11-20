@@ -1,5 +1,6 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage, UserMessage } from "@earendil-works/pi-ai";
+import { clipToCodeUnits } from "./recovery-parts.ts";
 
 export type ToolRecoveryReference = {
 	historyId: string;
@@ -60,12 +61,6 @@ function lastPublicReply(messages: readonly AgentMessage[]): AssistantMessage | 
 	return undefined;
 }
 
-function clipText(text: string, limit: number): string {
-	if (text.length <= limit) return text;
-	const end = /[\uD800-\uDBFF]/u.test(text[limit - 1] ?? "") ? limit - 1 : limit;
-	return text.slice(0, end);
-}
-
 function entryHeader(entry: ConversationEntry): string {
 	return `--- ${entry.kind}, historyId ${JSON.stringify(entry.historyId)} ---`;
 }
@@ -77,7 +72,7 @@ function clipMarker(entry: ConversationEntry, shown: number): string {
 }
 
 function formatEntry(entry: ConversationEntry, limit: number): string {
-	const text = clipText(entry.text, limit);
+	const text = clipToCodeUnits(entry.text, limit);
 	const lines = [entryHeader(entry), text];
 	if (text.length < entry.text.length) lines.push(clipMarker(entry, text.length));
 	return lines.join("\n");

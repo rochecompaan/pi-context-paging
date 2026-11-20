@@ -84,7 +84,22 @@ From the GitHub release tag:
 pi install git:github.com/rochecompaan/pi-context-paging@v0.3.11
 ```
 
+<!-- published-contract-disclosure -->
+Both commands above install the **published release**, and it is not the build described on the rest of
+this page. The 0.3.11 release and its `v0.3.11` tag predate the peer floor and the session-start
+capability guard, so on a Pi older than 0.87.0 that build accepts the install and then fails on the first
+request that reads the session projection; nothing in it refuses an unsupported host. Builds from this
+repository declare the floor in `peerDependencies`, so the install is refused, and turn paging off with a
+named report on a host that cannot provide the session projection. The floor itself is the same in both:
+see below.
+
 After installation, restart Pi.
+
+### Supported Pi versions
+
+Requires **Pi 0.87.0 or newer**, and the manifest says so: the three `@earendil-works/*` peers are declared `>=0.87.0`, so an install into a host that cannot page history is refused by npm rather than installed. The floor is a measured API boundary — the paging path calls `sessionManager.buildSessionProjection()`, which no older host provides. If an install path ignores peer ranges, the extension notices the missing API when the session starts, keeps paging off for that session, and reports the requirement once: the conversation is never interrupted.
+
+The `host-compat` CI job enforces the boundary: against the floor it runs the runtime contract (typecheck, the packed artifact, and the host APIs the extension calls) via `--runtime-only`, and against latest it runs the whole suite. The suite is not run on the floor because `eval/recall` resolves models through the newest host's registry — on the floor that rig reports failures while `src/` typechecks and the artifact loads.
 
 ## Settings
 
@@ -122,6 +137,11 @@ If the model window is smaller than the budget, the extension scales the target 
 The minimum target is one token.
 
 Both token settings accept positive safe integers only.
+
+A setting whose value cannot be read is ignored, the next source (or the default) applies, and the extension
+names the key, the file and the value it received — once per session, not on every reload. The trap worth
+knowing about is a quoted boolean: `"enabled": "false"` is a string, so paging uses the default and stays on.
+Write `"enabled": false`. Unread keys inside `contextPaging` are reported the same way.
 The extension does not convert strings, fractions, or other invalid values.
 An invalid project value does not apply. The extension then uses the global value, or the default.
 If a project sets a lower budget, an explicit global target stays explicit.
@@ -130,6 +150,34 @@ If you set a target at or above the budget, there is no headroom between cuts.
 The extension keeps stable cuts, but it trims to the effective budget instead.
 It warns once for each budget and target pair in one Pi process.
 A restart can repeat the warning.
+
+### Virtual models
+
+A [virtual model](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/virtual-models.md) routes each request to a physical model.
+Pi does not tell extensions which physical model the current request uses.
+A router can tell the extension from `route()`, which Pi calls before paging runs:
+
+```ts
+route(request, ctx) {
+  const model = ctx.modelRegistry.find("anthropic", "claude-haiku-4-5")!;
+  pi.events.emit("context-paging:route", { version: 1, provider: model.provider, id: model.id });
+  return { model, thinkingLevel: "medium" };
+}
+```
+
+The extension uses the reported model's context window for that one request.
+Send the report from `route()` only. The extension ignores a report sent at any other time, and drops it if the request fails before paging runs.
+A switch to another routed model resets the cut, as a model switch does.
+If the reported model is not a physical model in the registry, or its window is invalid, the extension aborts the request.
+The extension ignores payloads with another `version`.
+
+This report needs a Pi that routes: `route()` only runs on a Pi release with virtual models (the 1.5 line; the 0.87 line this package is developed against has no virtual models and never calls `route()`).
+On a Pi without it, no report is ever made, the extension uses the declared window, and a route to a smaller model is not caught — paging cannot warn you, because from its side nothing happened.
+
+Without a report, the extension uses the window that the virtual model declares.
+If the virtual model declares no window, the window is unknown, and the effective budget is `tokenBudget`.
+In both cases, set `tokenBudget` no higher than the smallest context window the router can choose.
+The extension cancels Pi's automatic compaction, so nothing else stops a request that is too large for the routed model.
 
 ## Session command
 
@@ -220,15 +268,27 @@ This can show matching tool output instead of the start of the assistant respons
 An ellipsis (`…`) marks a clipped end.
 Browse previews and empty-query search previews still start at the beginning.
 
+The `query` is required text, at most 200 characters.
 The `tools` filter matches any listed tool name.
 For example, `tools: ["bash", "codemode"]` matches a turn that used either tool, or both.
 An omitted or empty list adds no tool restriction.
 The text query and other filters still apply.
 The `files` filter requires every listed file.
+`failed` filters by turn outcome: `true` keeps turns that failed, `false` keeps the rest, and omitting it adds no failure restriction.
 
 With `load: true`, `search_history` returns all requested `references` and loads at most three `items`.
 The `unloadedHistoryIds` array lists the other matches in search order.
 Use `load_history` to load those IDs, at most three per call.
+
+### Browsing history
+
+`browse_history` needs `direction`: `backward`, `forward`, or `around`.
+Its anchor is `historyId` or `sequence` (0 to 1,000,000), never both, and both name a reference an earlier reply returned.
+`backward` and `forward` start one step past the anchor. With no anchor, `backward` starts at the newest item and `forward` at the oldest.
+`around` centres the reply on the anchor and includes it. With no anchor, the newest item is the centre.
+`count` is how many references to return, 1 to 10, default 5.
+`stride` is the step between them, 1 to 10, default 1, so `stride: 4` samples every fourth item.
+`load_history` takes 1 to 3 `historyIds`, each at most 128 characters.
 
 ### Reply limits and large items
 
@@ -420,6 +480,9 @@ Read [the architecture document](docs/architecture.md) for module and lifecycle 
 
 ## Changes in 0.3.11
 
+<!-- published-contract-disclosure -->
+
+- Installing this extension on a Pi below the supported floor is refused by the package manifest (`>=0.87.0` on the host peers), and an install that ignores peer ranges turns paging off for the session and reports the requirement once, instead of failing the user's first provider request. Both are properties of this repository's source, not of the release published as 0.3.11: that build declares `"*"` peers and has no capability guard, so it accepts an unsupported install and fails on the first request that reads the session projection. See the note under "Install".
 - `load_history`, and `search_history` with `load: true`, return items whole, smallest first, while they fit the 16 KiB reply. Before, every item over 4 KiB came back as parts.
 - `read_context_output` text mode returns a JSON header block, then the page as a second block. Strings and text blocks with only `type` and `text` read as plain text without JSON escaping. Other parts read as exact JSON.
 - Pages fill the 16 KiB reply instead of stopping at 2,000 characters. While text remains, the header has `next`, the exact arguments for the next read. `limit` is optional, up to 16,384.
@@ -538,16 +601,71 @@ The extension does not yet let the model choose which history to remove.
 Requirements:
 
 - Node.js 22.19.0 or newer
+- A Node.js build compiled with TypeScript support, to run the suite (`node --test --experimental-strip-types`).
+  Some distribution builds report `process.features.typescript === false` and then fail on every `.ts` file with
+  `ERR_NO_TYPESCRIPT`; `npm test` stops with that reason (see `scripts/check-node-typescript.mjs`) instead of
+  reporting dozens of failing test files. Loading the extension inside pi is unaffected: the host transpiles `.ts`
+  extensions with its own jiti loader.
 - npm
 
-Run all checks:
+Run the checks that protect every change:
 
 ```sh
 npm ci
+npm run check:release
 npm run typecheck
 npm test
 npm run check:package
+
+`npm publish` runs `npm run check` first, from every path and not only from CI. The one check it cannot run
+locally is `npm run check:host`, which installs published Pi releases; the Publish workflow runs that
+step, and it is deliberately not in the hook, so publishing offline is possible and publishing unverified is not.
 ```
+
+Then check host compatibility, which is what the `host-compat` CI job runs and the one check the list above
+cannot make locally: it installs the selected Pi in a temporary workspace and, against that host, typechecks the
+source, runs the suite, and loads the **packed artifact** through that host's own `pi` CLI. `peerDependencies`
+declares the floor named in "Supported Pi versions", so users load this extension on every Pi above that floor
+that the repository does not pin; a host that moves a type or rejects a tool schema fails here, not in the
+pinned dev dependency. The artifact stage does not stop at
+registration: it runs the host APIs the extension calls on a live path, so a missing session-manager method
+fails the gate instead of the user's first request. Two hosts are checked, the supported floor and latest.
+If the artifact stage dies while the host is loading the extension with a write error such as
+`Unknown system error -122`, the temporary filesystem is the problem, not the code: the host transpiles
+extensions when it loads them and the gate installs a whole Pi release into the workspace. Seen on a temp
+directory at 80 % full and gone once space was freed; point `--dir` at a filesystem with room, or free space
+and re-run.
+
+CI runs on pull requests and on pushes to `main`. A push to a topic branch on a fork triggers nothing, and a
+fork's pull-request runs wait for a maintainer to approve them, so work that lives only on a fork branch can
+sit behind a PR with no checks at all -- an empty check list, which a reviewer can read as "nothing ran" and
+not as "everything passed". To get CI receipts for such a branch, push its commit to the fork's own `main`:
+the same triggers apply there, and the job list from that run is the receipt. Measured: PR #10's head showed
+no checks; the same commit pushed to the fork's `main` ran all three jobs. That receipt is in the fork's
+Actions tab for the same SHA -- the pull request's own Checks tab stays empty (measured: 0 checks after those
+runs), because a fork pull request's runs need a maintainer to approve them. Say where to look; an empty Checks
+tab is not a passing run.
+
+A release tag is evidence, not a bookmark. The registry records the commit a published version was built from
+(`npm view <package>@<version> gitHead`), and the tag is this repository's claim about the same thing
+(`git rev-list -n1 v<version>`); `scripts/check-published-artifact.mjs` compares the two, so a version whose tag
+and published build disagree is a red check. Treat `v*` tags accordingly: `git tag -f v<version>` moves the
+comparison and destroys the record of what the release contained. Both facts come from measurement in this
+repository -- the registry's 0.3.11 and the source carrying the same number were 65 commits apart, and a
+`git tag -f` during a test moved the tag the comparison depends on (restored from the object store, target
+verified against the registry).
+
+```sh
+npm run check:host                     # the latest published Pi
+npm run check:host -- --host floor     # the oldest supported Pi (see COMPAT_FLOOR in the gate script)
+node scripts/check-host-compat.mjs --host 1.5.2 --dir /tmp/host-gate   # a chosen version, kept for re-runs
+node scripts/check-host-compat.mjs --dir /tmp/host-gate --typecheck-only    # one stage: --tests-only, --artifact-only
+```
+
+CI runs both groups, as separate jobs: `verify` runs `npm run check` (the three commands above), and `host-compat`
+runs `node scripts/check-host-compat.mjs` against the latest published Pi. The publish workflow runs the same host
+check before it publishes, so a tagged release is verified against a current Pi on its own, not by inference from
+the branch it was tagged from. Run `npm run check:host` yourself before raising the supported Pi range.
 
 Run the performance benchmark:
 
@@ -567,9 +685,12 @@ From a source checkout, run the offline preview after `npm ci`:
 
 ```sh
 npm run eval:recall -- --dry-run
+npm run eval:recall -- --help
 ```
 
-The preview sends no provider requests.
+The preview sends no provider requests. `--help` lists every accepted flag with its default and rule; the list is
+generated from the parser's own flag table, so it cannot drift from the flags the parser accepts. An argument mistake
+names the flag that caused it.
 Live pilots and batches each require separate user approval.
 Read the evaluation guide for preparation, limits, and result interpretation.
 

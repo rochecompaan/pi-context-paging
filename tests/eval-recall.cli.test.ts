@@ -2,7 +2,11 @@ import assert from "node:assert/strict";
 import { readFile, writeFile, readdir, chmod, access } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
-import { parseEvalArgs, runEval } from "../eval/recall/cli.ts";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import { EVAL_USAGE, evalFlags, isHelpRequest, parseEvalArgs, runEval } from "../eval/recall/cli.ts";
+import { safeError } from "../eval/recall/safe-artifacts.ts";
+import { defaultLimits } from "../eval/recall/request-guard.ts";
 import { cliFixture as fixture } from "./fixtures/eval-recall-cli.ts";
 
 test("argument parsing defaults to a provider-free dry run and rejects overrides or malformed limits", () => {
@@ -220,4 +224,64 @@ test("safety exhaustion returns exit 3 while keeping partial results", async t =
 	assert.equal(await runEval(parseEvalArgs(["--pilot", "--max-user-prompts", "23"]), f.dependencies), 3);
 	const { stageGroups } = JSON.parse(await readFile(join(f.directories[0], "results.json"), "utf8"));
 	assert.equal(stageGroups[0].stopReason, "max-user-prompts"); assert.ok(f.arms.every(arm => arm.disposed && arm.aborted));
+});
+
+// Measured failure these tests close: `npm run eval:recall -- --help` printed
+// `{"name":"Error","code":"INVALID_EVAL_ARGUMENTS"}` and exit 2, and so did every other argument mistake -- nine flags,
+// five structural rules, no flag named, no usage. The fix is --help plus flag-named failures, relayed through the
+// sanitized record (safeError omits Error#message on purpose, so reason/flag are the relayed fields).
+const entry = new URL("../scripts/recall-eval.ts", import.meta.url);
+const invoke = (args: string[]) => spawnSync(process.execPath, ["--experimental-strip-types", fileURLToPath(entry), ...args], {
+	encoding: "utf8",
+});
+
+test("--help prints the flag list the parser accepts, and every accepted flag is listed", () => {
+	assert.equal(isHelpRequest(["--help"]), true);
+	assert.equal(isHelpRequest(["-h"]), true);
+	assert.equal(isHelpRequest(["--pilot", "--help"]), false, "help is only a leading request, not a mid-list flag");
+	for (const flag of evalFlags) {
+		if (flag.startsWith("--")) assert.ok(EVAL_USAGE.includes(flag), `usage omits ${flag}`);
+	}
+	const run = invoke(["--help"]);
+	assert.equal(run.status, 0, `--help must succeed: ${run.stderr}`);
+	assert.ok(run.stdout.includes("Usage:"), "the entry point must print the usage block");
+	assert.ok(run.stdout.includes("--max-user-prompts"), "the printed usage must name the request-guard flags");
+	assert.ok(run.stdout.includes(String(defaultLimits.maxUserPrompts)),
+		"the usage text is generated from the parser's defaults, so it must show them");
+});
+
+test("an argument mistake names the flag that caused it, and the printed line points at --help", () => {
+	const cases: Array<readonly [string[], string]> = [
+		[["--model", "other"], "--model"],
+		[["--seed"], "--seed"],
+		[["--pairs", "x"], "--pairs"],
+		[["--max-pair-minutes", "1.5"], "--max-pair-minutes"],
+		[["--dry-run", "--batch"], "--batch"],
+		[["--batch"], "--batch"],
+		[["--pairs", "2"], "--pairs"],
+		[["--pilot", "--pilot-manifest", "p"], "--pilot-manifest"],
+		[["--seed", "a", "--seed", "b"], "--seed"],
+	];
+	for (const [args, flag] of cases) {
+		assert.throws(parseEvalArgs.bind(null, args), (error: unknown) => {
+			const record = safeError(error);
+			return record.code === "INVALID_EVAL_ARGUMENTS" && record.flag === flag && typeof record.reason === "string";
+		}, `parsing ${args.join(" ")} must fail naming ${flag}`);
+	}
+	const run = invoke(["--pairs", "x"]);
+	assert.equal(run.status, 2);
+	const printed = run.stderr + run.stdout;
+	assert.ok(printed.includes("--pairs"), `the printed failure must name the flag: ${printed}`);
+	assert.ok(printed.includes("--help"), `the printed failure must point at --help: ${printed}`);
+});
+
+test("the argument relay refuses a reason shaped like smuggled runtime text, keeping the flag signal", () => {
+	// The relay accepts only a single-line printable reason; a reason carrying control characters is dropped so a
+	// model payload cannot fake a console line, and the line falls back to the stable code.
+	const record = safeError(Object.assign(new Error("payload"), {
+		code: "INVALID_EVAL_ARGUMENTS", flag: "--seed", reason: "first line\nsecond line pretending to be output",
+	}));
+	assert.equal(record.reason, undefined);
+	assert.equal(record.flag, "--seed");
+	assert.equal(record.code, "INVALID_EVAL_ARGUMENTS");
 });

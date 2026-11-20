@@ -17,6 +17,12 @@ An assistant with `stopReason: "aborted"` or `"error"` remains recoverable with 
 Projection retains the original assistant and result objects and marks the turn failed. It does not synthesize results.
 Failed text-only responses also remain in raw history.
 
+`projectActiveBranchIncremental` reuses the previous projection prefix through a watermark: the projected items, the raw entry index through the last complete item, and the id of the last consumed raw entry.
+A matching watermark projects only the entries after it and appends their items, continuing their sequence numbers from the prefix.
+The projection is rebuilt in full when the watermark cannot be trusted: no previous watermark, a restore, a replaced interrupted-entry set (compared by reference), an anchor entry past the branch end, or an anchor entry whose id changed.
+When the remaining entries yield no items, the watermark is kept unchanged, so a trailing incomplete exchange is projected again on the next refresh.
+A paging-state reset drops the watermark, so the next refresh projects from the start.
+
 ## History navigation
 
 `recovery-content.ts` creates a public recovery view without changing raw branch items.
@@ -94,11 +100,30 @@ For the default budget, the target is `80_000`. A `64_000` budget has an implici
 An explicit trusted-project target takes precedence over a global target. An inherited global target stays explicit with a lower project budget.
 
 Both token settings accept positive safe integers. Invalid values fall through to the next trusted source, then the default.
+`settings.ts` also inspects a parsed file, reporting three problems: a key under `contextPaging` that no setting
+reads, a known key whose value cannot be read, and a `contextPaging` value that is not an object. `index.ts` turns
+each problem into one report per extension instance (the host runs the extension factory per session), naming the
+key, the scope, the file, and — for an unusable value — the value it received, with the rewrite the user can paste.
+Reporting never changes resolution: an unusable value falls through exactly as above, so a quoted
+`"enabled": "false"` reports and then uses the default. Only a file that cannot be parsed at all turns paging off.
 Direct policy calls instead throw `INVALID_TOKEN_BUDGET` or `INVALID_TRIM_TARGET` for invalid values before eviction.
 The existing positive-finite model-window validation remains separate.
 Integral scaling and adaptive defaults use exact integer arithmetic near the safe-integer limit.
 
 The effective budget is the smaller of the configured budget and model window, when the window exists.
+`routed-model.ts` resolves that window for each request.
+For a physical model, it is the model's own window.
+For a virtual model, Pi exposes only the selection, not the routed model.
+A router can report the routed model from `route()` on the `context-paging:route` event channel, with `{ version: 1, provider, id }`.
+That ordering is a property of Pi's virtual-model routing, which needs a Pi release that has it (the 1.5 line; this package is developed against 0.87, which has no virtual models and never calls `route()`).
+On a Pi without routing, `requestLimits` never sees a virtual model: no report is made and the declared window applies.
+A report belongs to one request. Pi emits `turn_start` before every request, then calls `route()`, then the `context` event, and awaits each step.
+`turn_start` opens a request for the current selection. The extension keeps the newest report made while a request is open.
+The `context` event takes the report and closes the request, even when paging is off. It ignores a report made under a different selection.
+A request that ends before the `context` event, such as a failed route, ends with an assistant `message_end` and `agent_end`; both close the request.
+`model_select`, `session_start`, `session_tree`, and `session_shutdown` also close it. A report made while no request is open is ignored.
+It reads the window from `ctx.modelRegistry`. A model that is missing, or virtual, aborts the provider call; an invalid physical window fails the existing validation.
+Without a report, the virtual model's declared window applies. Pi reports an unset window as `0`, which the extension treats as unknown, so the configured budget applies.
 The effective target is `max(1, floor(trimToTokens * effectiveBudget / tokenBudget))`.
 For a target at or above the configured budget, the cut destination is the effective budget instead.
 An explicit high target produces one warning per resolved budget/target pair per extension instance.
@@ -166,7 +191,10 @@ These stateless calls cannot promise prefix stability.
 `context-usage.ts` links a successful provider response to the exact selected request snapshot.
 It matches that snapshot against the projected persistent session and separates outgoing-only instructions.
 It subtracts the full persistent tail from Pi's status total, including system updates absent from outgoing messages.
-Resident prompt and tool schemas contribute once. Weak caches reuse message fingerprints and estimates.
+Resident prompt and tool schemas contribute once. `context-costs.ts` caches message fingerprints and estimates across requests.
+Pi clones the outgoing messages for every `context` hook, so object identity alone never matches between requests. A keyed cache addresses costs by journal entry instead: an assistant message binds through its tool-call ids to the owning model-turn entry id, and a tool result binds by its `toolCallId`. User and transient messages have no entry-derived key and keep the per-object cache alone.
+Each keyed entry also stores a content signature over the message's shape, every key, every string's length, and the ends of every string. A message rewritten under the same key costs that object on its own and leaves the journal entry's costs intact, so another extension's `context` rewrite cannot poison the cached cost.
+Keyed costs survive until the paging state resets, so the cache grows with the messages that were measured.
 When no valid response anchor exists, selection uses the heuristic fallback.
 Calibration uses the original incoming snapshot, before any remembered cut.
 `context-calibration.ts` separates positive undercount into resident overhead and costs assigned to measured persistent messages.
@@ -223,6 +251,9 @@ Partial-turn and prefix evictions add nothing, because their request stays in co
 The section fits the smallest of 32,000 code units, 10% of the effective budget at 4 characters per token, and the room left once every evictable unit is gone.
 Entries are chosen newest first and shown oldest first. Each entry is clipped to 6,000 code units and names the exact part that holds the full text.
 The selector rebuilds the notice only when the evicted record or recovery key changes, and it does not cache rebuilt notices.
+A stateful cut carries the conversation as plain records in its cut snapshot, captured at the last keyed boundary and capped to the entries a section can render.
+When the earlier-evicted turn count matches the records, the selector seeds the conversation from them instead of replaying every evicted turn, so a rebuilt notice renders the conversation a cold rebuild would produce.
+A count mismatch discards the records and replays the evicted turns.
 When a remembered cut leaves nothing to evict and its frozen notice no longer fits, the selector resizes the copied conversation before it rejects the request.
 The cut state keeps the resized notice until the frontier advances.
 
@@ -231,12 +262,14 @@ This guarantee includes the completion of a partial turn. It excludes other exte
 Protected-overflow replaces the leading notice. Recovery also replaces recoverable tool-result payloads.
 Oversized unread paging results receive short exclusion notices, not unreadable recovery handles. Their live call/result pairing remains intact.
 Entry into or exit from these modes can change the prefix without a frontier advance.
-When normal paging resumes, its frozen notice returns unchanged. Part 1 does not make every provider call append-only.
+When normal paging resumes, its frozen notice returns unchanged. Stateful paging does not make every provider call append-only: a stateless provenance fallback can also change the prefix without a frontier advance.
 
 ## Lifecycle
 
 `index.ts` resolves global and trusted-project settings at session start.
-The `/context-paging on|off|status|stats` command keeps an optional enabled override in memory.
+The same session start reports unread keys, unusable values, and a non-object `contextPaging` in the files it read —
+one report per distinct problem, and never for a file it did not read, so an untrusted project file is not named.
+The `/context-paging on|off|status|stats|rotate` command keeps an optional enabled override in memory.
 No arguments show the current state. Invalid arguments show usage without changing state.
 Paging, recovery tools, trim-target warnings, and automatic-compaction cancellation use the same effective enabled state.
 An actual enabled-state change resets cut state and accounting. Repeated choices and status queries do not reset either.
@@ -244,11 +277,19 @@ Every `session_start` clears the override before settings load, including new se
 Branch navigation, model changes, and compaction do not clear the override.
 The command does not write settings or session entries.
 
+A host that predates `sessionManager.buildSessionProjection()` is a third force-off, and it is measured, not declared:
+`MINIMUM_PI_VERSION` in `src/index.ts`, `COMPAT_FLOOR` in `scripts/check-host-compat.mjs`, the peer range in
+`package.json`, the README section, and the CI matrix all carry the same version, pinned by
+`tests/host-compat-contract.test.ts`. `session_start` probes the capability by calling the API — the recall replay rig
+records host interactions by path and arguments, so a property read is an interaction no recording made — and on a miss
+forces paging off for the session, reports the requirement once, refuses `/context-paging on` with the same sentence,
+and leaves the paging path touching no projection API at all. The recovery tools already refuse while paging is off.
+
 When `ctx.hasUI` is true, the extension publishes `isEnabled()` with `ctx.ui.setStatus("context-paging", text)`.
 The text is exactly `paging on` or `paging off`, without ANSI styling.
 Custom footers read the value from `footerData.getExtensionStatuses()`.
 Session start publishes the status after settings resolution.
-If settings load throws, the extension publishes the disabled fallback status. The settings error still propagates. Every `on` or `off` command publishes the effective status, including repeated choices.
+If settings load throws, the extension publishes the disabled fallback status: the enabled flag is cleared before the files are read, so a load that explodes cannot leave paging running on values the user did not express. The settings error is reported once and does not propagate, because a `session_start` that rejects skips the refresh that follows it. Every `on` or `off` command publishes the effective status, including repeated choices.
 Status queries, stats queries, and invalid arguments leave the status alone.
 Session shutdown clears only this status key. Headless sessions skip these UI calls.
 
@@ -258,10 +299,18 @@ The `context` event prepares usage from the original request, applies the select
 The `turn_end` event records response usage.
 Successful `session_start` events cover new sessions, resumes, and forks. Successful `session_tree` events cover branch navigation.
 These events reset cut state and accounting. Every actual `model_select` resets both, in either window-size direction.
+A `context` event whose limits come from a different model than the previous one also resets both. Under a virtual model, that covers a change of reported route.
 Successful `session_compact` events and newly projected compaction or `context_edit` entries also reset both.
 One `context_edit` is an exception: Pi's retry edit that omits a failed or aborted assistant response.
 That response was never sent, so the cut stays. The edit clears accounting only, because Pi's usage status then estimates the whole projection until the next measured response.
 The entry module deduplicates an event and its later saved-entry notification, so they cannot reset a newly established frontier twice.
+
+`/context-paging rotate [tokens]` queues one rotation: the next request trims to `trimToTokens`, or to `tokens`, even when the request already fits the budget. Callers use it after a prompt cache goes cold, where a full rewrite costs nothing extra.
+An explicit target must be a positive safe integer below the effective budget, and the queued target is scaled by a smaller model window exactly as `trimToTokens` is, so the command notification can name the target selection will use.
+The queue holds one rotation. A paging-state reset clears it, and a disabled extension rotates nothing.
+Rotation applies only to stateful selection, so a stateless provenance fallback never causes a one-turn cut and return.
+The queue is cleared where successful cut state is committed, so an aborted provider request keeps its rotation for the retry.
+The command reports the outcome of the consumed rotation: the resulting request size, or the reason the cut did not move.
 
 Missing raw frontier keys clear old cut state. Valid current provenance can establish a fresh cut without a provider abort.
 Canceled branch, fork, session-switch, and compaction attempts do not reset a cut.

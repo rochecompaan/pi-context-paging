@@ -62,6 +62,28 @@ const readContextOutputParameters = strictObject({
 
 type SearchHistoryInput = HistorySearchInput & { load?: boolean };
 
+/**
+ * What a host hands this handler for `readContextOutputParameters`. Current Pi types tool arguments from the
+ * parameter schema in its own schema language, which cannot express the string-enum helper's union, so
+ * `source` and `mode` arrive typed as `unknown` — the host still validates them against the schema, but the
+ * inference cannot say so. The handler widens at that boundary and narrows below, so the paging code keeps a
+ * precise input type and an out-of-schema value is named instead of flowing through as a valid selector.
+ */
+type HostContextOutputInput = Omit<ContextOutputReadInput, "source" | "mode"> & { source?: unknown; mode?: unknown };
+
+function narrowContextOutputInput(params: HostContextOutputInput): ContextOutputReadInput {
+	const { source, mode } = params;
+	// A value reaching here outside the schema means the host and this schema disagree, which is a defect worth
+	// naming — silently reading `source: "assistantn"` as “no selector” would return the wrong history entry.
+	if (source !== undefined && source !== "assistant" && source !== "toolResult") {
+		throw new Error(`read_context_output: source must be "assistant" or "toolResult", received ${JSON.stringify(source)}.`);
+	}
+	if (mode !== undefined && mode !== "text" && mode !== "parts" && mode !== "image") {
+		throw new Error(`read_context_output: mode must be "text", "parts", or "image", received ${JSON.stringify(mode)}.`);
+	}
+	return { ...params, source, mode };
+}
+
 function readReply(items: readonly HistoryItem[], params: ContextOutputReadInput) {
 	const mode = params.mode ?? "text";
 	validateHandleLengths(params);
@@ -137,9 +159,9 @@ export function registerContextPagingTools(
 		label: "Read Context Output",
 		description: "read_context_output reads public history through a part handle or legacy source selector. Default text mode returns a JSON header block, then the page as a second text block: plain text for strings and for text blocks with only type and string text, exact JSON for other parts. Pages fill a complete reply capped at 16 KiB. While more remains, the header has next, the exact arguments for the next read. With source assistant, contentIndex may be omitted when the turn has exactly one public text block, or no text block and one public block. With source toolResult, toolCallId may be omitted when the turn has exactly one public tool result. mode:parts pages part descriptions; mode:image returns one native image attachment from an image handle, exempt from the text cap. Image data never becomes text. Private blocks and paging exchanges are unavailable.",
 		parameters: readContextOutputParameters,
-		async execute(_toolCallId, params: ContextOutputReadInput, _signal, _onUpdate, ctx) {
+		async execute(_toolCallId, params: HostContextOutputInput, _signal, _onUpdate, ctx) {
 			const current = snapshot(dependencies, ctx);
-			return readReply(current.allItems, params);
+			return readReply(current.allItems, narrowContextOutputInput(params));
 		},
 	});
 }
