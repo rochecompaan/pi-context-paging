@@ -1,7 +1,7 @@
 import { estimateTokens } from "@earendil-works/pi-coding-agent";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { calibrateResponse, type ContextTokenEstimates, type ResponseCalibration } from "./context-calibration.ts";
-import { MessageCostCache, type MessageKeyResolver } from "./context-costs.ts";
+import { MessageCostCache, toolCallIds, type MessageKeyResolver } from "./context-costs.ts";
 
 type SnapshotMessage = {
 	message: AgentMessage;
@@ -48,6 +48,22 @@ function stableValue(value: unknown): unknown {
 			.map(([key, child]) => [key, stableValue(child)]));
 	}
 	return value;
+}
+
+function savedToolCallIds(messages: readonly AgentMessage[]): ReadonlySet<string> {
+	const ids = new Set<string>();
+	for (const message of messages) {
+		if (message.role === "assistant") for (const id of toolCallIds(message.content)) ids.add(id);
+	}
+	return ids;
+}
+
+// Only the call side needs this: a rewritten result still follows its call, but a recovered
+// result must stay outgoing so its replacement text is not costed as the saved original.
+function isSavedToolCallMessage(message: AgentMessage, savedCallIds: ReadonlySet<string>): boolean {
+	if (message.role !== "assistant") return false;
+	const ids = toolCallIds(message.content);
+	return ids.length > 0 && ids.every((id) => savedCallIds.has(id));
 }
 
 /** Links a successful provider response to the exact context snapshot selected for it. */
@@ -128,7 +144,12 @@ export class ContextUsageTracker {
 	}
 
 	outgoingOnly(messages: readonly AgentMessage[], persistentMessages: readonly AgentMessage[]): boolean[] {
-		return this.snapshot(messages, persistentMessages).map((message) => !message.persistent);
+		const savedCallIds = savedToolCallIds(persistentMessages);
+		// Earlier context handlers may rewrite a saved tool call, such as display labels stripped
+		// from thinking text. Its tool-call IDs still prove that it was saved; marking it outgoing
+		// would leave its saved results looking orphaned in the active turn.
+		return this.snapshot(messages, persistentMessages)
+			.map(({ message, persistent }) => !persistent && !isSavedToolCallMessage(message, savedCallIds));
 	}
 
 	recordResponse(message: AgentMessage): void {
