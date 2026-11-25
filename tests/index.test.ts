@@ -1345,6 +1345,15 @@ test("a report made outside a request is ignored", async () => {
 	assert.equal(harness.abortCalls(), 0);
 });
 
+test("a change of routed model keeps a queued rotation", async () => {
+	const { harness, request } = routedFixture();
+	await request({ version: 1, provider: "lab", id: "large" });
+	await runPagingCommand(harness, "rotate");
+	await request({ version: 1, provider: "lab", id: "small" });
+	assert.match(harness.notifications.at(-1)!.message, /rotated to [\d,]+ tokens|skipped the rotation/);
+	assert.equal(harness.abortCalls(), 0);
+});
+
 test("a reported route that cannot be resolved aborts the provider call", async () => {
 	const { harness, request } = routedFixture();
 	harness.addModel({ provider: "lab", id: "broken", contextWindow: 0 });

@@ -333,7 +333,12 @@ export default function contextPagingExtension(
 			return { messages: event.messages };
 		}
 		// A virtual model can route each request to a different model, which is a model switch.
-		if (limitsKey !== undefined && limitsKey !== limits.key) resetPagingState();
+		// The user did not switch, so a rotation they queued still applies.
+		if (limitsKey !== undefined && limitsKey !== limits.key) {
+			const queued = pendingRotation;
+			resetPagingState();
+			pendingRotation = queued;
+		}
 		limitsKey = limits.key;
 
 		let rawHistoryItems: readonly HistoryItem[] | undefined;
