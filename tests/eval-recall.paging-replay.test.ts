@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test, { mock } from "node:test";
 import { prepareReplayFixture } from "./fixtures/eval-recall-checkpoint.ts";
+import { EVAL_MODEL, PAGING_SETTINGS } from "../eval/recall/experiment-settings.ts";
 
 // A lost calibration/remembered cut must change the actual next native request.
 test("replay reproduces calibrated selection without dispatch", async t => {
@@ -88,4 +89,25 @@ test("repeated restore follows the same subsequent cut trajectory", async t => {
 	assert.deepEqual(third.nativeView(), fixture.checkpointView);
 	assert.deepEqual(await third.next(), firstFuturePayload, "source and sibling progress must not mutate the frozen tape");
 	assert.deepEqual(fixture.checkpointView, fixture.frozenView());
+});
+
+// A replay that drops the registry lookup or the startup warning must fail this test.
+test("replay restores sessions with model overrides and their startup warning", async t => {
+	mock.timers.enable({ apis: ["Date"], now: 1_790_000_000_000 });
+	t.after(() => mock.timers.reset());
+	const cases = {
+		"a known model key": { [`${EVAL_MODEL.provider}/${EVAL_MODEL.id}`]: { tokenBudget: 128_000 } },
+		"override values that do not apply": { "unknown/model": { enabled: "no" } },
+		"an override list that is not an object": [],
+	};
+	for (const [name, modelOverrides] of Object.entries(cases)) {
+		const fixture = await prepareReplayFixture("calibrated-cut", {
+			globalSettings: { contextPaging: { ...PAGING_SETTINGS, modelOverrides } }, projectTrusted: false,
+		});
+		try {
+			const restored = await fixture.restore();
+			assert.equal(restored.restoration.passed, true, name);
+			assert.deepEqual(await restored.next(), await fixture.source.next(), name);
+		} finally { await fixture.close(); }
+	}
 });

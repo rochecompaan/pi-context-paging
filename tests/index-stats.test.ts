@@ -29,7 +29,7 @@ function statsTheme(light = false): Theme {
 	} as ConstructorParameters<typeof Theme>[0], { selectedBg: "#000000" } as ConstructorParameters<typeof Theme>[1], "truecolor");
 }
 
-function statsHarness(manager = SessionManager.inMemory(), enabled = true, tokenBudget = 128_000) {
+function statsHarness(manager = SessionManager.inMemory(), enabled = true, tokenBudget = 128_000, modelOverrides: object = {}) {
 	const handlers = new Map<string, Handler>();
 	const commands = new Map<string, Omit<RegisteredCommand, "name" | "sourceInfo">>();
 	const notifications: Array<{ message: string; level: string }> = [];
@@ -58,7 +58,7 @@ function statsHarness(manager = SessionManager.inMemory(), enabled = true, token
 		getActiveTools: () => [],
 		getAllTools: () => [],
 		appendEntry() { appends++; },
-	} as any, { globalSettings: { contextPaging: { enabled, tokenBudget } }, projectTrusted: false });
+	} as any, { globalSettings: { contextPaging: { enabled, tokenBudget, modelOverrides } }, projectTrusted: false });
 	const command = async (args: string) => {
 		const registered = commands.get("context-paging");
 		assert.ok(registered);
@@ -337,4 +337,12 @@ test("stats reflects the session override and marks the budget inactive when pag
 	await harness.command("off");
 	assert.match(await harness.report(), /Context paging: off/);
 	assert.equal(field(await harness.report(), "Input tokens"), "145");
+});
+
+test("stats reports the active model's budget", async () => {
+	const harness = statsHarness(SessionManager.inMemory(), true, 4_000, { "p/m": { tokenBudget: 3_000 } });
+	const model = { provider: "p", id: "m", contextWindow: 5_000 };
+	harness.ctx.model = model as any;
+	await harness.emit("model_select", { model });
+	assert.match(field(await harness.report(), "Paging budget"), /^3,000/);
 });

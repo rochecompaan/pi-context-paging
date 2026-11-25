@@ -1656,3 +1656,112 @@ test("reuses projected prefix items across context requests after a restore", as
 	assert.doesNotMatch(text, /PREFIX_REBUILT/);
 	assert.match(text, /NEXT_REQUEST/, "appended entries are still projected");
 });
+
+test("pages each model against its own model budget", async () => {
+	const harness = createHarness({
+		globalSettings: { contextPaging: { enabled: true, modelOverrides: { "small/model": { tokenBudget: 300 } } } },
+		projectTrusted: false,
+	});
+	const old = user(`OLD ${"x".repeat(2_000)}`);
+	const actual = user("ACTUAL");
+	const selectFor = async (provider: string) => {
+		const model = { provider, id: "model", contextWindow: 64_000 };
+		harness.ctx.model = model;
+		await emit(harness, "model_select", { model });
+		harness.setBranch([entry("old", old), entry("actual", actual)]);
+		return (await emit(harness, "context", { messages: [old, actual] }) as any).messages;
+	};
+	assert.equal(hasMarker(await selectFor("small"), "OLD"), false);
+	assert.equal(hasMarker(await selectFor("large"), "OLD"), true);
+	assert.equal(hasMarker(await selectFor("small"), "OLD"), false);
+});
+
+test("names a model override in status only when it sets enabled", async () => {
+	const harness = createHarness({
+		globalSettings: {
+			contextPaging: { modelOverrides: { "a/budget": { tokenBudget: 300 }, "a/off": { enabled: false } } },
+		},
+		projectTrusted: false,
+	});
+	for (const id of ["budget", "off"]) {
+		const model = { provider: "a", id, contextWindow: 64_000 };
+		harness.ctx.model = model;
+		await emit(harness, "model_select", { model });
+		await runPagingCommand(harness, "status");
+	}
+	assert.deepEqual(harness.notifications.slice(-2).map((item) => item.message), [
+		"Context paging is enabled for this session.",
+		"Context paging is disabled for a/off by its model override.",
+	]);
+});
+
+test("warns at session start about model overrides that do not apply", async () => {
+	const harness = createHarness({
+		globalSettings: {
+			contextPaging: {
+				modelOverrides: {
+					"a/known": { enabled: false },
+					"openrouter/deep/seek": { enabled: false },
+					"a/typo": { enabled: false },
+					"a/bad": { enabled: "no" },
+				},
+			},
+		},
+		projectTrusted: false,
+	});
+	for (const [provider, id] of [["a", "known"], ["openrouter", "deep/seek"], ["a", "bad"]]) {
+		harness.addModel({ provider: provider!, id: id!, contextWindow: 64_000 });
+	}
+	await emit(harness, "session_start", { reason: "startup" });
+	const warnings = harness.notifications.filter((item) => item.level === "warning");
+	assert.deepEqual(warnings.map((item) => item.message), [
+		"Context paging found problems in these settings:\n"
+			+ '- global contextPaging.modelOverrides["a/bad"].enabled must be true or false.\n'
+			+ '- contextPaging.modelOverrides["a/typo"] matches no model Pi knows at session start.',
+	]);
+});
+
+function modelOverrideFixture(override: Record<string, unknown>, contextPaging: Record<string, unknown> = { tokenBudget: 1_000 }) {
+	const fixture = resetFixture();
+	const model = { provider: "p", id: "m", contextWindow: 64_000 };
+	fixture.harness.ctx.model = model as any;
+	return { ...fixture, model, harness: createHarness({
+		globalSettings: { contextPaging: { enabled: true, ...contextPaging, modelOverrides: { "p/m": override } } }, projectTrusted: false,
+	}) };
+}
+
+async function selectModel(harness: ReturnType<typeof createHarness>, model: object) {
+	harness.ctx.model = model as any;
+	await emit(harness, "model_select", { model });
+}
+
+test("rotate accepts a target between the top-level budget and the model budget", async () => {
+	const { harness, model } = modelOverrideFixture({ tokenBudget: 2_000 });
+	await selectModel(harness, model);
+	await runPagingCommand(harness, "rotate 1500");
+	assert.equal(harness.notifications.at(-1)!.level, "info");
+	assert.match(harness.notifications.at(-1)!.message, /rotate to 1,500 tokens/);
+});
+
+test("rotate trims to the model target when no target is given", async () => {
+	const fixture = modelOverrideFixture({ trimToTokens: 200 });
+	const { harness, model, messages } = fixture;
+	harness.setBranch(messages.map((message, index) => entry(`reset-${index}`, message)));
+	harness.ctx.getSystemPrompt = () => "system";
+	await selectModel(harness, model);
+	await runPagingCommand(harness, "rotate");
+	const rotated = await emit(harness, "context", { messages }) as any;
+	assert.equal(hasMarker(rotated.messages, "RESET_C request"), false, "the top-level 625-token target would keep RESET_C");
+});
+
+test("the headroom warning names the active model's budget and target", async () => {
+	const { harness, model, messages } = modelOverrideFixture(
+		{ tokenBudget: 1_000, trimToTokens: 1_000 }, { tokenBudget: 128_000, trimToTokens: 80_000 },
+	);
+	harness.setBranch(messages.map((message, index) => entry(`reset-${index}`, message)));
+	await selectModel(harness, model);
+	await emit(harness, "context", { messages });
+	assert.deepEqual(harness.notifications.filter((item) => item.level === "warning").map((item) => item.message), [
+		"Context paging tokenBudget=1000, trimToTokens=1000 leaves no headroom. A smaller trimToTokens restores room between cuts.",
+	]);
+});

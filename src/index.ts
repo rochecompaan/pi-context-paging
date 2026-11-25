@@ -21,6 +21,7 @@ import { modelKey, requestLimits, RouteReports, type RequestLimits } from "./rou
 
 import {
 	resolveContextPagingSettings,
+	settingsForModel,
 	type ContextPagingSettingsSources,
 	type ResolvedContextPagingSettings,
 } from "./settings.ts";
@@ -111,6 +112,10 @@ function branchEdits(branch: readonly SessionEntry[]): BranchEdits {
 	return edits;
 }
 
+function modelKeyOf(model: { provider: string; id: string } | undefined): string | undefined {
+	return model ? `${model.provider}/${model.id}` : undefined;
+}
+
 /** Registers context paging lifecycle hooks and the four recovery tools. */
 export default function contextPagingExtension(
 	pi: ExtensionAPI,
@@ -120,7 +125,9 @@ export default function contextPagingExtension(
 		? resolveContextPagingSettings(settingsSources)
 		: resolveContextPagingSettings({ globalSettings: { contextPaging: { enabled: false } }, projectTrusted: false });
 	let sessionEnabled: boolean | undefined;
-	const isEnabled = () => sessionEnabled ?? resolvedSettings.enabled;
+	let activeModelKey: string | undefined;
+	const modelSettings = () => settingsForModel(resolvedSettings, activeModelKey);
+	const isEnabled = () => sessionEnabled ?? modelSettings().enabled;
 	const publishStatus = (ctx: ExtensionContext) => {
 		if (ctx.hasUI) ctx.ui.setStatus("context-paging", isEnabled() ? "paging on" : "paging off");
 	};
@@ -144,12 +151,26 @@ export default function contextPagingExtension(
 		pendingRotation = undefined;
 	};
 	const warnAboutTrimTarget = (ctx: ExtensionContext) => {
-		const { tokenBudget, trimToTokens, trimToTokensExplicit } = resolvedSettings;
+		const { tokenBudget, trimToTokens, trimToTokensExplicit } = modelSettings();
 		if (!isEnabled() || !trimToTokensExplicit || trimToTokens < tokenBudget) return;
 		const pair = `${tokenBudget}:${trimToTokens}`;
 		if (warnedSettingPairs.has(pair)) return;
 		warnedSettingPairs.add(pair);
 		ctx.ui.notify(`Context paging tokenBudget=${tokenBudget}, trimToTokens=${trimToTokens} leaves no headroom. A smaller trimToTokens restores room between cuts.`, "warning");
+	};
+	// Pi creates a new extension instance for each session, so each session warns once.
+	const warnAboutSettingProblems = (ctx: ExtensionContext) => {
+		const problems = [...resolvedSettings.settingProblems];
+		for (const modelKey of resolvedSettings.modelOverrides.keys()) {
+			const slash = modelKey.indexOf("/");
+			const known = slash > 0 && ctx.modelRegistry.find(modelKey.slice(0, slash), modelKey.slice(slash + 1)) !== undefined;
+			if (!known) {
+				problems.push(`contextPaging.modelOverrides[${JSON.stringify(modelKey)}] matches no model Pi knows at session start.`);
+			}
+		}
+		const message = problems.map((problem) => `- ${problem}`).join("\n");
+		if (message === "") return;
+		ctx.ui.notify(`Context paging found problems in these settings:\n${message}`, "warning");
 	};
 	let visibleHistoryIds: string[] = [];
 	let invalidatingBranchEntries = new Set<string>();
@@ -211,7 +232,7 @@ export default function contextPagingExtension(
 			const action = args.trim();
 			if (action === "stats") {
 				try {
-					ctx.ui.notify(await contextPagingStats(ctx, isEnabled(), resolvedSettings.tokenBudget, latestInput), "info");
+					ctx.ui.notify(await contextPagingStats(ctx, isEnabled(), modelSettings().tokenBudget, latestInput), "info");
 				} catch (error) {
 					ctx.ui.notify(`Context paging stats are unavailable: ${errorMessage(error)}`, "warning");
 				}
@@ -227,8 +248,8 @@ export default function contextPagingExtension(
 					ctx.ui.notify("Context paging is disabled for this session.", "warning");
 					return;
 				}
-				const { tokenBudget } = resolvedSettings;
-				const requested = rotateCommand.trimToTokens ?? resolvedSettings.trimToTokens;
+				const { tokenBudget, trimToTokens } = modelSettings();
+				const requested = rotateCommand.trimToTokens ?? trimToTokens;
 				// selectContext caps the target at the budget, so a target at or above it would rotate nothing.
 				if (tokenBudget <= requested) {
 					ctx.ui.notify(`Rotation target must be below the ${tokenBudget.toLocaleString("en-US")}-token budget.`, "warning");
@@ -257,7 +278,14 @@ export default function contextPagingExtension(
 				ctx.ui.notify(COMMAND_USAGE, "warning");
 				return;
 			}
-			ctx.ui.notify(`Context paging is ${isEnabled() ? "enabled" : "disabled"} for this session.`, "info");
+			const modelOverride = sessionEnabled === undefined && modelSettings().enabledByModelOverride;
+			const state = isEnabled() ? "enabled" : "disabled";
+			ctx.ui.notify(
+				modelOverride
+					? `Context paging is ${state} for ${activeModelKey} by its model override.`
+					: `Context paging is ${state} for this session.`,
+				"info",
+			);
 		},
 	});
 
@@ -269,17 +297,19 @@ export default function contextPagingExtension(
 	pi.on("session_start", async (_event, ctx) => {
 		sessionEnabled = undefined;
 		routeReports.close();
+		activeModelKey = modelKeyOf(ctx.model);
 		resetPagingState();
 		invalidatingBranchEntries = new Set();
 		omittedFailureEntries = new Set();
 		try {
 			if (!settingsSources) {
-				resolvedSettings = { ...resolvedSettings, enabled: false };
+				resolvedSettings = { ...resolvedSettings, enabled: false, modelOverrides: new Map() };
 				resolvedSettings = resolveContextPagingSettings(await loadSettings(ctx));
 			}
 		} finally {
 			publishStatus(ctx);
 		}
+		warnAboutSettingProblems(ctx);
 		refreshSafely(ctx, true);
 	});
 	pi.on("session_shutdown", (_event, ctx) => {
@@ -308,9 +338,11 @@ export default function contextPagingExtension(
 		omittedFailureEntries = new Set();
 		refreshSafely(ctx, true);
 	});
-	pi.on("model_select", () => {
+	pi.on("model_select", (event, ctx) => {
 		routeReports.close();
 		resetPagingState();
+		activeModelKey = modelKeyOf(event.model);
+		publishStatus(ctx);
 	});
 	pi.on("session_compact", (event) => {
 		const id = event.compactionEntry?.id;
@@ -363,10 +395,11 @@ export default function contextPagingExtension(
 			const contextTokens = usageTracker.prepare(
 				event.messages, residentTokens, ctx.getContextUsage()?.tokens, canonicalSessionMessages ?? [],
 			);
+			const { tokenBudget, trimToTokens } = modelSettings();
 			const selectionLimits = {
 				modelContextWindow: limits.contextWindow,
-				tokenBudget: resolvedSettings.tokenBudget,
-				trimToTokens: rotation?.trimToTokens ?? resolvedSettings.trimToTokens,
+				tokenBudget,
+				trimToTokens: rotation?.trimToTokens ?? trimToTokens,
 			};
 			const selection = selectContext({
 				messages: event.messages,

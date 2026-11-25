@@ -270,6 +270,8 @@ The `turn_end` event records response usage.
 Successful `session_start` events cover new sessions, resumes, and forks. Successful `session_tree` events cover branch navigation.
 These events reset cut state and accounting. Every actual `model_select` resets both, in either window-size direction.
 A `context` event whose limits come from a different model than the previous one also resets both. Under a virtual model, that covers a change of reported route.
+
+`session_start` and `model_select` also record the active `provider/modelId`. Under a virtual model, this is the selected model, not the routed one. The enabled check reads the session choice, then that model's `modelOverrides` entry, then `enabled`. The `context` hook, stats, and the trim warning read `tokenBudget` and `trimToTokens` from that entry, then from the top level. A model `tokenBudget` without a model `trimToTokens` derives the 5/8 target from the model budget. `model_select` publishes the footer status again, because the override can change it. `resolveContextPagingSettings` records override values that do not apply in `settingProblems`. `session_start` adds override keys that `ctx.modelRegistry.find(provider, modelId)` does not know, splitting the key at its first `/`, and notifies once. Pi creates a new extension instance for each session, so the warning is not de-duplicated.
 Successful `session_compact` events and newly projected compaction or `context_edit` entries also reset both.
 One `context_edit` is an exception: Pi's retry edit that omits a failed or aborted assistant response.
 That response was never sent, so the cut stays. The edit clears accounting only, because Pi's usage status then estimates the whole projection until the next measured response.

@@ -33,7 +33,7 @@ export function equalPrivate(left: unknown, right: unknown): boolean {
 	return isDeepStrictEqual(comparable(left), comparable(right));
 }
 
-const nested = new Set(["ctx.sessionManager", "ctx.ui"]);
+const nested = new Set(["ctx.sessionManager", "ctx.ui", "ctx.modelRegistry"]);
 const effects = new Set(["ctx.ui.notify"]);
 
 /** Records exactly the host reads the real handler uses, including call arguments. */
@@ -59,6 +59,7 @@ export function recordFacade<T extends object>(target: T, root: string, input: R
 				// Unknown host actions are not reinterpreted as pure replayable reads.
 				if (!/^ctx\.(?:isProjectTrusted|isIdle|hasPendingMessages|getContextUsage|getSystemPrompt)$/.test(path)
 					&& !/^ctx\.sessionManager\.(?:get\w+|buildSessionProjection|buildContextEntries)$/.test(path)
+					&& !/^ctx\.modelRegistry\.find$/.test(path)
 					&& !/^pi\.(?:getActiveTools|getAllTools)$/.test(path)) throw new Error(`Unsupported host action ${path}`);
 				const result = Reflect.apply(value, object, args);
 				input.reads.push({ path, args: copyPrivate(args), value: copyPrivate(result) });
@@ -86,7 +87,7 @@ export function replayFacades(input: ReplayInputs): { at<T extends object>(root:
 			const expected = input.reads[cursor];
 			if (!expected || expected.path !== path) throw new Error("Replay host-read mismatch");
 			// The handler calls known methods; other captured values are properties.
-			if (/\.(?:get\w+|is\w+|hasPendingMessages|buildSessionProjection|buildContextEntries)$/.test(path)) return (...args: unknown[]) => next(path, args);
+			if (/\.(?:get\w+|is\w+|hasPendingMessages|buildSessionProjection|buildContextEntries)$|^ctx\.modelRegistry\.find$/.test(path)) return (...args: unknown[]) => next(path, args);
 			return next(path, []);
 		},
 	});

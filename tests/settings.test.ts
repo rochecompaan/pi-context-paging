@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { defaultTrimToTokens, resolveContextPagingSettings } from "../src/settings.ts";
+import { defaultTrimToTokens, settingsForModel, resolveContextPagingSettings } from "../src/settings.ts";
 
 const invalidTargets: unknown[] = [
 	0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY,
@@ -98,4 +98,146 @@ test("computes the adaptive default exactly for accepted integer boundaries", ()
 	assert.equal(defaultTrimToTokens(1), 1);
 	assert.equal(defaultTrimToTokens(Number.MAX_SAFE_INTEGER - 1), 5_629_499_534_213_118);
 	assert.equal(defaultTrimToTokens(Number.MAX_SAFE_INTEGER - 4), 5_629_499_534_213_116);
+});
+
+test("merges trusted project model overrides over global ones by model key", () => {
+	const settings = resolveContextPagingSettings({
+		globalSettings: { contextPaging: { modelOverrides: { "a/one": { enabled: false }, "b/two": { enabled: false } } } },
+		projectSettings: { contextPaging: { modelOverrides: { "b/two": { enabled: true }, "c/three": { enabled: false } } } },
+		projectTrusted: true,
+	});
+	assert.equal(settingsForModel(settings, "a/one").enabled, false);
+	assert.equal(settingsForModel(settings, "b/two").enabled, true);
+	assert.equal(settingsForModel(settings, "c/three").enabled, false);
+	assert.equal(settingsForModel(settings, "d/four").enabled, true);
+	assert.equal(settingsForModel(settings, undefined).enabled, true);
+});
+
+test("ignores untrusted project model overrides", () => {
+	const settings = resolveContextPagingSettings({
+		globalSettings: { contextPaging: { modelOverrides: { "a/one": { enabled: false } } } },
+		projectSettings: { contextPaging: { modelOverrides: { "a/one": { enabled: true } } } },
+		projectTrusted: false,
+	});
+	assert.equal(settingsForModel(settings, "a/one").enabled, false);
+});
+
+test("falls through invalid model overrides to the next source", () => {
+	for (const invalid of [true, "off", null, [], { enabled: "false" }, { enabled: 0 }, {}]) {
+		const settings = resolveContextPagingSettings({
+			globalSettings: { contextPaging: { enabled: false, modelOverrides: { "a/one": { enabled: true } } } },
+			projectSettings: { contextPaging: { modelOverrides: { "a/one": invalid } } },
+			projectTrusted: true,
+		});
+		assert.equal(settingsForModel(settings, "a/one").enabled, true, `invalid override: ${JSON.stringify(invalid)}`);
+		assert.equal(settingsForModel(settings, "b/two").enabled, false);
+	}
+	for (const invalid of [true, "x", null, []]) {
+		const settings = resolveContextPagingSettings({
+			globalSettings: { contextPaging: { modelOverrides: invalid } }, projectTrusted: false,
+		});
+		assert.equal(settings.modelOverrides.size, 0);
+	}
+});
+
+test("does not resolve model overrides from inherited object keys", () => {
+	const settings = resolveContextPagingSettings({
+		globalSettings: { contextPaging: { enabled: true, modelOverrides: JSON.parse('{"__proto__": {"enabled": false}}') } },
+		projectTrusted: false,
+	});
+	assert.equal(settingsForModel(settings, "constructor").enabled, true);
+	assert.equal(settingsForModel(settings, "toString").enabled, true);
+});
+
+test("merges model override fields one by one across sources", () => {
+	const settings = resolveContextPagingSettings({
+		globalSettings: { contextPaging: { modelOverrides: { "a/one": { enabled: false, tokenBudget: 64_000 } } } },
+		projectSettings: { contextPaging: { modelOverrides: { "a/one": { tokenBudget: 32_000, trimToTokens: "x" } } } },
+		projectTrusted: true,
+	});
+	assert.deepEqual(settingsForModel(settings, "a/one"), {
+		enabled: false, tokenBudget: 32_000, trimToTokens: 20_000, trimToTokensExplicit: false, enabledByModelOverride: true,
+	});
+});
+
+test("derives the model target from a model budget instead of the global explicit target", () => {
+	const settings = resolveContextPagingSettings({
+		globalSettings: {
+			contextPaging: {
+				tokenBudget: 128_000,
+				trimToTokens: 80_000,
+				modelOverrides: { "a/one": { tokenBudget: 48_000 }, "b/two": { trimToTokens: 60_000 } },
+			},
+		},
+		projectTrusted: false,
+	});
+	assert.deepEqual(settingsForModel(settings, "a/one"), {
+		enabled: true, tokenBudget: 48_000, trimToTokens: 30_000, trimToTokensExplicit: false, enabledByModelOverride: false,
+	});
+	assert.deepEqual(settingsForModel(settings, "b/two"), {
+		enabled: true, tokenBudget: 128_000, trimToTokens: 60_000, trimToTokensExplicit: true, enabledByModelOverride: false,
+	});
+	assert.deepEqual(settingsForModel(settings, "c/three"), {
+		enabled: true, tokenBudget: 128_000, trimToTokens: 80_000, trimToTokensExplicit: true, enabledByModelOverride: false,
+	});
+});
+
+test("ignores invalid model token values", () => {
+	for (const invalid of invalidTargets) {
+		const settings = resolveContextPagingSettings({
+			globalSettings: { contextPaging: { tokenBudget: 96_000, modelOverrides: { "a/one": { tokenBudget: invalid, trimToTokens: invalid } } } },
+			projectTrusted: false,
+		});
+		const { tokenBudget, trimToTokens } = settingsForModel(settings, "a/one");
+		assert.deepEqual({ tokenBudget, trimToTokens }, { tokenBudget: 96_000, trimToTokens: 60_000 }, `invalid value: ${String(invalid)}`);
+	}
+});
+
+test("ignores a window-relative budget string at every level", () => {
+	for (const ratio of ["auto", "auto:0.5"]) {
+		const settings = resolveContextPagingSettings({
+			globalSettings: { contextPaging: { tokenBudget: 96_000, modelOverrides: { "a/one": { tokenBudget: ratio } } } },
+			projectSettings: { contextPaging: { tokenBudget: ratio } },
+			projectTrusted: true,
+		});
+		assert.equal(settings.tokenBudget, 96_000, `top-level budget: ${ratio}`);
+		assert.equal(settingsForModel(settings, "a/one").tokenBudget, 96_000, `model budget: ${ratio}`);
+	}
+});
+
+test("reports model override values that do not apply", () => {
+	const settings = resolveContextPagingSettings({
+		globalSettings: {
+			contextPaging: {
+				modelOverrides: {
+					"a/one": { enabled: "false", tokenBudget: 0, trimToTokens: "80000" },
+					"a/two": { enable: false },
+					"a/three": true,
+					"a/ok": { enabled: false, tokenBudget: 64_000, trimToTokens: 40_000 },
+				},
+			},
+		},
+		projectSettings: { contextPaging: { modelOverrides: [] } },
+		projectTrusted: true,
+	});
+	assert.deepEqual(settings.settingProblems, [
+		'global contextPaging.modelOverrides["a/one"].enabled must be true or false.',
+		'global contextPaging.modelOverrides["a/one"].tokenBudget must be a positive integer.',
+		'global contextPaging.modelOverrides["a/one"].trimToTokens must be a positive integer.',
+		'global contextPaging.modelOverrides["a/two"] has an unknown field "enable".',
+		'global contextPaging.modelOverrides["a/three"] must be an object.',
+		"project contextPaging.modelOverrides must be an object.",
+	]);
+	assert.equal(settingsForModel(settings, "a/ok").enabled, false);
+});
+
+test("reports no problems for valid or absent model overrides", () => {
+	for (const contextPaging of [{}, { modelOverrides: {} }, { modelOverrides: { "a/one": { enabled: true } } }]) {
+		const settings = resolveContextPagingSettings({ globalSettings: { contextPaging }, projectTrusted: false });
+		assert.deepEqual(settings.settingProblems, []);
+	}
+	const untrusted = resolveContextPagingSettings({
+		globalSettings: {}, projectSettings: { contextPaging: { modelOverrides: true } }, projectTrusted: false,
+	});
+	assert.deepEqual(untrusted.settingProblems, [], "untrusted project settings are ignored, not reported");
 });

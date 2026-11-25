@@ -31,7 +31,7 @@ export type ReplayFixture = {
 };
 
 /** Real SDK and paging tools with local SSE and fixture-controlled future identities. */
-export async function prepareReplayFixture(caseName: ReplayCase): Promise<ReplayFixture> {
+export async function prepareReplayFixture(caseName: ReplayCase, settings?: ContextPagingSettingsSources): Promise<ReplayFixture> {
 	const root = await mkdtemp(join(tmpdir(), "recall-replay-"));
 	const cwd = join(root, "workspace");
 	await mkdir(cwd);
@@ -41,7 +41,7 @@ export async function prepareReplayFixture(caseName: ReplayCase): Promise<Replay
 	let summarizeNext = false;
 	const opaque = { type: "reasoning" as const, id: "rs-fixture", encrypted_content: "SYNTHETIC_PRIVATE_CONTINUATION", summary: [] };
 	async function make(entries?: SessionEntry[], configuration?: ContextPagingSettingsSources) {
-		const replay = createPagingReplay(configuration ?? { globalSettings: { contextPaging: { ...PAGING_SETTINGS } }, projectTrusted: false });
+		const replay = createPagingReplay(configuration ?? settings ?? { globalSettings: { contextPaging: { ...PAGING_SETTINGS } }, projectTrusted: false });
 		const provider = await fixtureRuntime((_index, context) => {
 			const usage = { ...measuredUsage,
 				input_tokens: Math.ceil(context.messages.reduce((sum, message) => sum + estimateTokens(message), 0) * 1.35) + 8_000 };
