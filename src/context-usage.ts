@@ -50,20 +50,20 @@ function stableValue(value: unknown): unknown {
 	return value;
 }
 
-function savedToolCallIds(messages: readonly AgentMessage[]): ReadonlySet<string> {
-	const ids = new Set<string>();
-	for (const message of messages) {
-		if (message.role === "assistant") for (const id of toolCallIds(message.content)) ids.add(id);
-	}
-	return ids;
+// Matches cut provenance: an assistant's timestamp plus its complete call-ID list.
+function toolCallSignature(message: AgentMessage): string | undefined {
+	if (message.role !== "assistant") return undefined;
+	const ids = toolCallIds(message.content);
+	return ids.length === 0 ? undefined : `${message.timestamp}\u0000${JSON.stringify(ids)}`;
 }
 
-// Only the call side needs this: a rewritten result still follows its call, but a recovered
-// result must stay outgoing so its replacement text is not costed as the saved original.
-function isSavedToolCallMessage(message: AgentMessage, savedCallIds: ReadonlySet<string>): boolean {
-	if (message.role !== "assistant") return false;
-	const ids = toolCallIds(message.content);
-	return ids.length > 0 && ids.every((id) => savedCallIds.has(id));
+function countSignatures(messages: Iterable<AgentMessage>): Map<string, number> {
+	const counts = new Map<string, number>();
+	for (const message of messages) {
+		const signature = toolCallSignature(message);
+		if (signature !== undefined) counts.set(signature, (counts.get(signature) ?? 0) + 1);
+	}
+	return counts;
 }
 
 /** Links a successful provider response to the exact context snapshot selected for it. */
@@ -144,12 +144,22 @@ export class ContextUsageTracker {
 	}
 
 	outgoingOnly(messages: readonly AgentMessage[], persistentMessages: readonly AgentMessage[]): boolean[] {
-		const savedCallIds = savedToolCallIds(persistentMessages);
+		const snapshot = this.snapshot(messages, persistentMessages);
 		// Earlier context handlers may rewrite a saved tool call, such as display labels stripped
-		// from thinking text. Its tool-call IDs still prove that it was saved; marking it outgoing
-		// would leave its saved results looking orphaned in the active turn.
-		return this.snapshot(messages, persistentMessages)
-			.map(({ message, persistent }) => !persistent && !isSavedToolCallMessage(message, savedCallIds));
+		// from thinking text. Marking it outgoing would leave its saved results looking orphaned in
+		// the active turn. Accept the rewrite only as the one candidate for one unclaimed saved
+		// assistant, so a reused call ID never inherits another exchange's provenance. Results keep
+		// exact matching: a recovered result must be costed by its replacement text.
+		const saved = countSignatures(persistentMessages);
+		const claimed = new Set(snapshot.filter(({ persistent }) => persistent)
+			.map(({ message }) => toolCallSignature(message)));
+		const candidates = countSignatures(snapshot.filter(({ persistent }) => !persistent).map(({ message }) => message));
+		return snapshot.map(({ message, persistent }) => {
+			if (persistent) return false;
+			const signature = toolCallSignature(message);
+			return signature === undefined || claimed.has(signature)
+				|| saved.get(signature) !== 1 || candidates.get(signature) !== 1;
+		});
 	}
 
 	recordResponse(message: AgentMessage): void {

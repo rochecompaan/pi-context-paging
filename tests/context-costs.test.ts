@@ -97,3 +97,23 @@ test("a recovered tool result is not treated as its persistent original", () => 
 		content: [{ type: "text", text: "Read the exact stored result with read_context_output(...)." }] };
 	assert.deepEqual(tracker.outgoingOnly([structuredClone(persistent[0]!), recovered], persistent), [false, true]);
 });
+
+test("a rewritten assistant counts as saved only through a unique saved match", () => {
+	const tracker = new ContextUsageTracker(new MessageCostCache());
+	const saved = [assistant(["call-1"]), result("call-1")];
+	const rewritten = (message: AssistantMessage, extra: object): AssistantMessage => ({ ...structuredClone(message), ...extra });
+
+	// An earlier context handler rewrote the saved assistant; its timestamp and call IDs still match.
+	const relabelled = rewritten(saved[0] as AssistantMessage, { model: "relabelled" });
+	assert.deepEqual(tracker.outgoingOnly([relabelled, structuredClone(saved[1]!)], saved), [false, false]);
+
+	// An outgoing exchange that reuses the saved call ID is not the saved message.
+	const reused = rewritten(saved[0] as AssistantMessage, { timestamp: timestamp + 1, model: "outgoing" });
+	assert.deepEqual(tracker.outgoingOnly([structuredClone(saved[0]!), structuredClone(saved[1]!), reused], saved),
+		[false, false, true]);
+
+	// Two candidates for one saved assistant are ambiguous, so neither inherits its provenance.
+	const twin = rewritten(saved[0] as AssistantMessage, { model: "twin" });
+	assert.deepEqual(tracker.outgoingOnly([relabelled, twin], saved), [true, true]);
+	assert.deepEqual(tracker.outgoingOnly([structuredClone(saved[0]!), twin], saved), [false, true]);
+});
