@@ -468,6 +468,29 @@ test("keeps persistent requests, outgoing instructions, and protected tool conti
 	assert.equal(harness.abortCalls(), 0);
 });
 
+test("keeps an active tool exchange whose saved assistant was rewritten by an earlier context handler", async () => {
+	const harness = createHarness();
+	const request = user("ACTIVE_REQUEST");
+	const thinkingCall = (thinking: string) => ({
+		role: "assistant" as const,
+		content: [
+			{ type: "thinking" as const, thinking, thinkingSignature: "{\"id\":\"rs_1\"}" },
+			{ type: "toolCall" as const, id: "relabelled-call", name: "read", arguments: { path: "src/file.ts" } },
+		],
+		timestamp: 0,
+	});
+	// pi-tool-display saves a display label in thinking text and strips it before each model call.
+	const saved = thinkingCall("\u001b[38;2;167;152;215mThinking:\u001b[39m **Reading the file**");
+	const outgoing = thinkingCall("**Reading the file**");
+	const toolResult = result("relabelled-call", "RELABELLED_RESULT");
+	harness.setBranch([entry("request", request), entry("call", saved), entry("result", toolResult)]);
+
+	const selection = await emit(harness, "context", { messages: [request, outgoing, toolResult] }) as any;
+
+	assert.equal(harness.abortCalls(), 0, harness.notifications.map(({ message }) => message).join("\n"));
+	assert.deepEqual(selection.messages, [request, outgoing, toolResult]);
+});
+
 test("uses measured anchors across repeated paged requests with a protected tool continuation", async () => {
 	const harness = createHarness({
 		globalSettings: { contextPaging: { enabled: true, tokenBudget: 400 } },

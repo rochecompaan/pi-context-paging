@@ -123,7 +123,7 @@ export type MessageKeyResolver = (message: AgentMessage) => string | undefined;
 
 type ToolCallLike = { id: string };
 
-function toolCallIds(content: unknown): string[] {
+export function toolCallIds(content: unknown): string[] {
 	if (!Array.isArray(content)) return [];
 	return content.flatMap((block) => {
 		if (typeof block === "object" && block !== null

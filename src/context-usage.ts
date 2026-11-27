@@ -1,7 +1,7 @@
 import { estimateTokens } from "@earendil-works/pi-coding-agent";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { calibrateResponse, type ContextTokenEstimates, type ResponseCalibration } from "./context-calibration.ts";
-import { MessageCostCache, type MessageKeyResolver } from "./context-costs.ts";
+import { MessageCostCache, toolCallIds, type MessageKeyResolver } from "./context-costs.ts";
 
 type SnapshotMessage = {
 	message: AgentMessage;
@@ -48,6 +48,22 @@ function stableValue(value: unknown): unknown {
 			.map(([key, child]) => [key, stableValue(child)]));
 	}
 	return value;
+}
+
+// Matches cut provenance: an assistant's timestamp plus its complete call-ID list.
+function toolCallSignature(message: AgentMessage): string | undefined {
+	if (message.role !== "assistant") return undefined;
+	const ids = toolCallIds(message.content);
+	return ids.length === 0 ? undefined : `${message.timestamp}\u0000${JSON.stringify(ids)}`;
+}
+
+function countSignatures(messages: Iterable<AgentMessage>): Map<string, number> {
+	const counts = new Map<string, number>();
+	for (const message of messages) {
+		const signature = toolCallSignature(message);
+		if (signature !== undefined) counts.set(signature, (counts.get(signature) ?? 0) + 1);
+	}
+	return counts;
 }
 
 /** Links a successful provider response to the exact context snapshot selected for it. */
@@ -128,7 +144,22 @@ export class ContextUsageTracker {
 	}
 
 	outgoingOnly(messages: readonly AgentMessage[], persistentMessages: readonly AgentMessage[]): boolean[] {
-		return this.snapshot(messages, persistentMessages).map((message) => !message.persistent);
+		const snapshot = this.snapshot(messages, persistentMessages);
+		// Earlier context handlers may rewrite a saved tool call, such as display labels stripped
+		// from thinking text. Marking it outgoing would leave its saved results looking orphaned in
+		// the active turn. Accept the rewrite only as the one candidate for one unclaimed saved
+		// assistant, so a reused call ID never inherits another exchange's provenance. Results keep
+		// exact matching: a recovered result must be costed by its replacement text.
+		const saved = countSignatures(persistentMessages);
+		const claimed = new Set(snapshot.filter(({ persistent }) => persistent)
+			.map(({ message }) => toolCallSignature(message)));
+		const candidates = countSignatures(snapshot.filter(({ persistent }) => !persistent).map(({ message }) => message));
+		return snapshot.map(({ message, persistent }) => {
+			if (persistent) return false;
+			const signature = toolCallSignature(message);
+			return signature === undefined || claimed.has(signature)
+				|| saved.get(signature) !== 1 || candidates.get(signature) !== 1;
+		});
 	}
 
 	recordResponse(message: AgentMessage): void {
